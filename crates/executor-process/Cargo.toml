@@ -1,0 +1,14 @@
+[package]
+name = "agent-harness-executor-process"
+version = "0.1.0"
+description = "Workspace file tools and local/bubblewrap process backends for agent-harness"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+agent-harness-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+

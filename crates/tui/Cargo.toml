@@ -1,0 +1,21 @@
+[package]
+name = "agent-harness-tui"
+version = "0.1.0"
+description = "Crossterm TUI for the modular agent harness"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+agent-harness-context-fs.workspace = true
+agent-harness-core.workspace = true
+agent-harness-executor-process.workspace = true
+agent-harness-provider-openai.workspace = true
+crossterm.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[[bin]]
+name = "agent-harness-tui"
+path = "src/bin/main.rs"
+

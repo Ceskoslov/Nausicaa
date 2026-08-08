@@ -1,0 +1,13 @@
+[package]
+name = "agent-harness-core"
+version = "0.1.0"
+description = "A small, event-driven, policy-aware core for an agent harness"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+

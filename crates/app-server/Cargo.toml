@@ -1,0 +1,14 @@
+[package]
+name = "agent-harness-app-server"
+version = "0.1.0"
+description = "Line-oriented JSON-RPC thread/turn control plane for agent-harness"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+agent-harness-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+

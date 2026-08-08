@@ -1,0 +1,13 @@
+[package]
+name = "agent-harness-provider-openai"
+version = "0.1.0"
+description = "OpenAI-compatible chat completions adapter for agent-harness"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+agent-harness-core.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+

@@ -1,0 +1,37 @@
+[package]
+name = "agent-harness"
+version = "0.1.0"
+description = "Feature-gated facade for the modular agent harness"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+app-server = ["dep:agent-harness-app-server"]
+context-fs = ["dep:agent-harness-context-fs"]
+memory = ["dep:agent-harness-memory"]
+process-executor = ["dep:agent-harness-executor-process"]
+provider-openai = ["dep:agent-harness-provider-openai"]
+task-ledger = ["dep:agent-harness-task-ledger"]
+tui = ["dep:agent-harness-tui"]
+full = [
+    "app-server",
+    "context-fs",
+    "memory",
+    "process-executor",
+    "provider-openai",
+    "task-ledger",
+    "tui",
+]
+
+[dependencies]
+agent-harness-app-server = { workspace = true, optional = true }
+agent-harness-context-fs = { workspace = true, optional = true }
+agent-harness-core.workspace = true
+agent-harness-executor-process = { workspace = true, optional = true }
+agent-harness-memory = { workspace = true, optional = true }
+agent-harness-provider-openai = { workspace = true, optional = true }
+agent-harness-task-ledger = { workspace = true, optional = true }
+agent-harness-tui = { workspace = true, optional = true }
+
