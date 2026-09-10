@@ -89,6 +89,7 @@ struct JsonlState {
     file: File,
     next_sequence: u64,
     events: Vec<EventEnvelope>,
+    write_failed: bool,
 }
 
 /// Append-only JSONL store. Each successful append is flushed and `sync_data`'d
@@ -96,13 +97,14 @@ struct JsonlState {
 #[derive(Debug)]
 pub struct JsonlEventStore {
     path: PathBuf,
+    recovered_tail: Option<PathBuf>,
     state: Mutex<JsonlState>,
 }
 
 impl JsonlEventStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref().to_path_buf();
-        let read_file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .create(true)
             .read(true)
             .append(true)
@@ -110,19 +112,75 @@ impl JsonlEventStore {
             .map_err(io_error)?;
 
         let mut events = Vec::new();
-        for (index, line) in BufReader::new(&read_file).lines().enumerate() {
-            let line = line.map_err(io_error)?;
-            if line.trim().is_empty() {
-                continue;
+        let mut reader = BufReader::new(&file);
+        let mut line = Vec::new();
+        let mut line_number = 0;
+        let mut valid_bytes = 0_u64;
+        let mut torn_tail = None;
+        let mut needs_newline = false;
+        loop {
+            line.clear();
+            let count = reader.read_until(b'\n', &mut line).map_err(io_error)?;
+            if count == 0 {
+                break;
             }
-            let event = serde_json::from_str::<EventEnvelope>(&line).map_err(|error| {
-                StoreError::Corrupt {
-                    line: index + 1,
-                    message: error.to_string(),
+            line_number += 1;
+            let terminated = line.ends_with(b"\n");
+            if !line.iter().all(u8::is_ascii_whitespace) {
+                match serde_json::from_slice::<EventEnvelope>(&line) {
+                    Ok(event) => events.push(event),
+                    Err(error) if !terminated && error.is_eof() => {
+                        torn_tail = Some(line.clone());
+                        break;
+                    }
+                    Err(error) => {
+                        return Err(StoreError::Corrupt {
+                            line: line_number,
+                            message: error.to_string(),
+                        });
+                    }
                 }
-            })?;
-            events.push(event);
+            }
+            valid_bytes += count as u64;
+            needs_newline = !terminated;
         }
+        drop(reader);
+
+        // Only an unterminated, syntactically incomplete final record is
+        // repairable. Preserve it durably before modifying the original log.
+        let recovered_tail = if let Some(bytes) = torn_tail {
+            let mut backup_name = path.as_os_str().to_os_string();
+            backup_name.push(format!(".torn-{}", EventId::new()));
+            let backup_path = PathBuf::from(backup_name);
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut backup = options.open(&backup_path).map_err(io_error)?;
+            backup.write_all(&bytes).map_err(io_error)?;
+            backup.sync_all().map_err(io_error)?;
+            #[cfg(unix)]
+            File::open(
+                path.parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(Path::new(".")),
+            )
+            .and_then(|directory| directory.sync_all())
+            .map_err(io_error)?;
+            file.set_len(valid_bytes).map_err(io_error)?;
+            file.sync_all().map_err(io_error)?;
+            Some(backup_path)
+        } else {
+            // A complete JSON value whose final newline was lost is retained.
+            if needs_newline {
+                file.write_all(b"\n").map_err(io_error)?;
+                file.sync_data().map_err(io_error)?;
+            }
+            None
+        };
         events.sort_by_key(|event| event.sequence);
         let next_sequence = events
             .iter()
@@ -130,18 +188,14 @@ impl JsonlEventStore {
             .max()
             .map_or(0, |sequence| sequence + 1);
 
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(io_error)?;
-
         Ok(Self {
             path,
+            recovered_tail,
             state: Mutex::new(JsonlState {
                 file,
                 next_sequence,
                 events,
+                write_failed: false,
             }),
         })
     }
@@ -149,6 +203,12 @@ impl JsonlEventStore {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Raw incomplete tail archived during this open, if any.
+    #[must_use]
+    pub fn recovered_tail_path(&self) -> Option<&Path> {
+        self.recovered_tail.as_deref()
     }
 }
 
@@ -160,13 +220,21 @@ impl EventStore for JsonlEventStore {
         event: RuntimeEvent,
     ) -> Result<EventEnvelope, StoreError> {
         let mut state = self.state.lock().map_err(|_| StoreError::Poisoned)?;
+        if state.write_failed {
+            return Err(StoreError::Io(
+                "a previous append failed; reopen the event store before writing".to_owned(),
+            ));
+        }
         let envelope = make_envelope(state.next_sequence, thread_id, turn_id, event);
         let encoded = serde_json::to_vec(&envelope)
             .map_err(|error| StoreError::Serialization(error.to_string()))?;
+        // Any I/O failure may leave a partial record. Do not append behind it.
+        state.write_failed = true;
         state.file.write_all(&encoded).map_err(io_error)?;
         state.file.write_all(b"\n").map_err(io_error)?;
         state.file.flush().map_err(io_error)?;
         state.file.sync_data().map_err(io_error)?;
+        state.write_failed = false;
         state.next_sequence += 1;
         state.events.push(envelope.clone());
         Ok(envelope)

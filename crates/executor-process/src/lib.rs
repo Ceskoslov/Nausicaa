@@ -488,6 +488,198 @@ pub fn register_workspace_tools(
     Ok(())
 }
 
+// Pipe draining must not outlive the command indefinitely, even if a descendant
+// escapes the process group and retains an inherited stdout/stderr descriptor.
+const OUTPUT_CLEANUP_TIMEOUT: Duration = Duration::from_millis(250);
+
+#[cfg(unix)]
+fn run_command(
+    mut command: Command,
+    timeout_ms: u64,
+    maximum_output_bytes: usize,
+) -> Result<ProcessOutput, ProcessError> {
+    use std::os::unix::process::CommandExt;
+
+    command.process_group(0);
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(io_error)?;
+    let result = capture_process(&mut child, timeout_ms, maximum_output_bytes);
+    if result.is_err() {
+        let _ = kill_process_group(&child);
+        let _ = child.kill();
+        // A process stuck in kernel I/O may not reap promptly after SIGKILL.
+        // Keep cleanup off the caller's critical path in that exceptional case.
+        thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
+    result
+}
+
+#[cfg(unix)]
+fn kill_process_group(child: &std::process::Child) -> Result<(), ProcessError> {
+    let pid = i32::try_from(child.id()).map_err(|error| ProcessError::Io(error.to_string()))?;
+    // SAFETY: process_group(0) creates a new group whose positive ID is the
+    // spawned child's PID. A negative PID targets that group, not our own.
+    let result = unsafe { libc::kill(-pid, libc::SIGKILL) };
+    if result == -1 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(io_error(error));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn child_has_exited(child: &std::process::Child) -> Result<bool, ProcessError> {
+    // Keep the exited child waitable until group cleanup is done. Reaping it
+    // before kill(-pid) could allow its PID to be reused for an unrelated group.
+    // SAFETY: zero initializes siginfo_t, and waitid writes to this live value.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child.id() as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if result == -1 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            return Ok(false);
+        }
+        return Err(io_error(error));
+    }
+    // SAFETY: successful waitid provides SIGCHLD fields, or leaves the
+    // initialized PID at zero when WNOHANG finds no exited child.
+    Ok(unsafe { info.si_pid() } != 0)
+}
+
+#[cfg(unix)]
+struct CapturedPipe<R> {
+    reader: R,
+    retained: Vec<u8>,
+    maximum: usize,
+    truncated: bool,
+    eof: bool,
+}
+
+#[cfg(unix)]
+impl<R: Read + std::os::fd::AsRawFd> CapturedPipe<R> {
+    fn new(reader: R, maximum: usize) -> Result<Self, ProcessError> {
+        let fd = reader.as_raw_fd();
+        // SAFETY: reader owns a live descriptor for the duration of both calls.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1
+        {
+            return Err(io_error(std::io::Error::last_os_error()));
+        }
+        Ok(Self {
+            reader,
+            retained: Vec::with_capacity(maximum.min(8192)),
+            maximum,
+            truncated: false,
+            eof: false,
+        })
+    }
+
+    fn drain(&mut self) -> Result<(), ProcessError> {
+        if self.eof {
+            return Ok(());
+        }
+        let mut buffer = [0_u8; 8192];
+        // Bound each batch so continuous output cannot starve deadline checks
+        // or the other pipe. Keep discarding excess bytes until EOF.
+        for _ in 0..32 {
+            match self.reader.read(&mut buffer) {
+                Ok(0) => {
+                    self.eof = true;
+                    break;
+                }
+                Ok(count) => {
+                    let remaining = self.maximum.saturating_sub(self.retained.len());
+                    self.retained
+                        .extend_from_slice(&buffer[..count.min(remaining)]);
+                    self.truncated |= count > remaining;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(io_error(error)),
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn capture_process(
+    child: &mut std::process::Child,
+    timeout_ms: u64,
+    maximum: usize,
+) -> Result<ProcessOutput, ProcessError> {
+    let mut stdout = CapturedPipe::new(
+        child
+            .stdout
+            .take()
+            .ok_or_else(|| ProcessError::Io("stdout pipe was not created".into()))?,
+        maximum,
+    )?;
+    let mut stderr = CapturedPipe::new(
+        child
+            .stderr
+            .take()
+            .ok_or_else(|| ProcessError::Io("stderr pipe was not created".into()))?,
+        maximum,
+    )?;
+    let start = Instant::now();
+    let timeout = Duration::from_millis(timeout_ms.max(1));
+    let mut exited = false;
+    let mut cleanup_started = None;
+    let mut timed_out = false;
+    loop {
+        stdout.drain()?;
+        stderr.drain()?;
+        if !exited {
+            exited = child_has_exited(child)?;
+        }
+        if cleanup_started.is_none() && (exited || start.elapsed() >= timeout) {
+            timed_out = !exited;
+            // This runner owns foreground command groups. Background work must
+            // use a separate managed execution rather than orphaning children.
+            kill_process_group(child)?;
+            cleanup_started = Some(Instant::now());
+        }
+        if exited && stdout.eof && stderr.eof {
+            break;
+        }
+        if cleanup_started.is_some_and(|at: Instant| at.elapsed() >= OUTPUT_CLEANUP_TIMEOUT) {
+            if !exited {
+                return Err(ProcessError::Io(
+                    "process did not exit within the cleanup deadline".into(),
+                ));
+            }
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let status = child.wait().map_err(io_error)?;
+    Ok(ProcessOutput {
+        exit_code: status.code(),
+        stdout: String::from_utf8_lossy(&stdout.retained).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr.retained).into_owned(),
+        timed_out,
+        stdout_truncated: stdout.truncated || !stdout.eof,
+        stderr_truncated: stderr.truncated || !stderr.eof,
+    })
+}
+
+#[cfg(not(unix))]
 fn run_command(
     mut command: Command,
     timeout_ms: u64,
@@ -520,6 +712,15 @@ fn run_command(
         }
         thread::sleep(Duration::from_millis(10));
     };
+    let cleanup_started = Instant::now();
+    while !stdout_reader.is_finished() || !stderr_reader.is_finished() {
+        if cleanup_started.elapsed() >= OUTPUT_CLEANUP_TIMEOUT {
+            return Err(ProcessError::Io(
+                "output pipes did not close within the cleanup deadline".into(),
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
     let (stdout, stdout_truncated) = stdout_reader
         .join()
         .map_err(|_| ProcessError::Io("stdout reader panicked".to_owned()))??;
@@ -536,6 +737,7 @@ fn run_command(
     })
 }
 
+#[cfg(not(unix))]
 fn read_capped(mut reader: impl Read, maximum: usize) -> Result<(Vec<u8>, bool), ProcessError> {
     let mut retained = Vec::with_capacity(maximum.min(8192));
     let mut buffer = [0_u8; 8192];
@@ -719,5 +921,100 @@ mod tests {
         assert_eq!(requests[0].command, "pwd");
         assert_eq!(requests[0].timeout_ms, 1);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn shell_output(command: &str, timeout_ms: u64, maximum: usize) -> ProcessOutput {
+        let mut shell = Command::new("/bin/sh");
+        shell.arg("-c").arg(command);
+        run_command(shell, timeout_ms, maximum).unwrap()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn timeout_kills_descendants_and_does_not_wait_for_inherited_pipes() {
+        let start = Instant::now();
+        let output = shell_output("sleep 3 & echo $!; wait", 100, 1024);
+        assert!(start.elapsed() < Duration::from_secs(2), "{output:?}");
+        assert!(output.timed_out);
+        assert_eq!(output.exit_code, None);
+        #[cfg(target_os = "linux")]
+        {
+            let pid: u32 = output.stdout.trim().parse().unwrap();
+            if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
+                // A killed orphan may remain a zombie until the host reaps it.
+                let state = stat.rsplit_once(") ").unwrap().1.chars().next().unwrap();
+                assert!(
+                    matches!(state, 'Z' | 'X'),
+                    "descendant is still running: {stat}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn exited_shell_cleans_up_background_children() {
+        let start = Instant::now();
+        let output = shell_output("sleep 3 & printf done", 5000, 1024);
+        assert!(start.elapsed() < Duration::from_secs(2), "{output:?}");
+        assert_eq!(output.exit_code, Some(0));
+        assert!(!output.timed_out);
+        assert_eq!(output.stdout, "done");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn continuous_output_is_capped_without_starving_timeout_or_stderr() {
+        let start = Instant::now();
+        let output = shell_output(
+            "while :; do printf 1234567890; printf abcdefghij >&2; done",
+            100,
+            32,
+        );
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert!(output.timed_out);
+        assert_eq!(output.stdout.len(), 32);
+        assert_eq!(output.stderr.len(), 32);
+        assert!(output.stdout_truncated && output.stderr_truncated);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn ordinary_command_preserves_output_and_exit_status() {
+        let output = shell_output("printf out; printf err >&2; exit 7", 1000, 1024);
+        assert_eq!(output.stdout, "out");
+        assert_eq!(output.stderr, "err");
+        assert_eq!(output.exit_code, Some(7));
+        assert!(!output.timed_out);
+        assert!(!output.stdout_truncated && !output.stderr_truncated);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cleanup_deadline_bounds_output_held_open_outside_the_process_group() {
+        use std::os::fd::OwnedFd;
+        use std::os::unix::{net::UnixStream, process::CommandExt};
+
+        // Hold the writer in the test process to simulate a descendant outside
+        // the managed group retaining stdout after the foreground process exits.
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        writer.write_all(b"retained").unwrap();
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .process_group(0)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdout = Some(std::process::ChildStdout::from(OwnedFd::from(reader)));
+        let start = Instant::now();
+        let output = capture_process(&mut child, 1000, 1024).unwrap();
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert_eq!(output.exit_code, Some(0));
+        assert_eq!(output.stdout, "retained");
+        assert!(output.stdout_truncated);
+        assert!(!output.stderr_truncated);
+        assert!(!output.timed_out);
     }
 }

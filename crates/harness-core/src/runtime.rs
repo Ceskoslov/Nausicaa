@@ -11,7 +11,7 @@ use crate::event::{EventEnvelope, EventObserver, HookPoint, RuntimeEvent};
 use crate::executor::{RejectingExecutor, ToolExecutor};
 use crate::hook::{HookContext, HookError, HookSet};
 use crate::id::{CallId, ThreadId, TurnId};
-use crate::model::{ModelAdapter, ModelError, ModelRequest};
+use crate::model::{ModelAdapter, ModelError, ModelRequest, StopReason};
 use crate::policy::{CapabilityProjection, PolicyContext, ToolPolicy, project_capabilities};
 use crate::protocol::{ToolCall, ToolReceipt, TranscriptMessage};
 use crate::recovery::{RecoveryReport, recover_thread};
@@ -64,6 +64,11 @@ pub enum RuntimeError {
     },
     #[error("model returned an invalid response for turn `{turn_id}`: {reason}")]
     InvalidModelResponse { turn_id: TurnId, reason: String },
+    #[error("model stopped without a complete response for turn `{turn_id}`: {stop_reason:?}")]
+    IncompleteModelResponse {
+        turn_id: TurnId,
+        stop_reason: StopReason,
+    },
     #[error("turn `{0}` was cancelled")]
     Cancelled(TurnId),
     #[error("turn `{turn_id}` exceeded {maximum} model iterations")]
@@ -189,6 +194,12 @@ impl AgentRuntime {
     /// observers. No external action is automatically replayed.
     pub fn recover(&self, thread_id: &ThreadId) -> Result<RecoveryReport, RuntimeError> {
         self.ensure_thread(thread_id)?;
+        let _active = self.acquire_thread(thread_id)?;
+        self.recover_exclusive(thread_id)
+    }
+
+    // The caller must hold this runtime's active-thread guard.
+    fn recover_exclusive(&self, thread_id: &ThreadId) -> Result<RecoveryReport, RuntimeError> {
         let before = self
             .store
             .load_thread(thread_id)?
@@ -236,7 +247,7 @@ impl AgentRuntime {
         self.ensure_thread(thread_id)?;
         let _active = self.acquire_thread(thread_id)?;
         self.ensure_turn_unused(thread_id, &turn_id)?;
-        self.recover(thread_id)?;
+        self.recover_exclusive(thread_id)?;
 
         let input = input.into();
         self.append(
@@ -342,6 +353,51 @@ impl AgentRuntime {
                 content: response.content.clone(),
                 tool_calls: response.tool_calls.clone(),
             });
+
+            // Retain partial output for inspection, but never execute calls from
+            // an incomplete response or report it as successful completion.
+            let stop_error = match response.stop_reason {
+                StopReason::MaxTokens | StopReason::Other => {
+                    Some(RuntimeError::IncompleteModelResponse {
+                        turn_id: turn_id.clone(),
+                        stop_reason: response.stop_reason,
+                    })
+                }
+                StopReason::ToolUse if response.tool_calls.is_empty() => {
+                    Some(RuntimeError::InvalidModelResponse {
+                        turn_id: turn_id.clone(),
+                        reason: "tool-use stop has no tool calls".to_owned(),
+                    })
+                }
+                StopReason::EndTurn if !response.tool_calls.is_empty() => {
+                    Some(RuntimeError::InvalidModelResponse {
+                        turn_id: turn_id.clone(),
+                        reason: "end-turn stop contains tool calls".to_owned(),
+                    })
+                }
+                _ => None,
+            };
+            if let Some(error) = stop_error {
+                for call in &response.tool_calls {
+                    self.record_receipt(
+                        thread_id,
+                        &turn_id,
+                        ToolReceipt::denied(
+                            call.id.clone(),
+                            call.name.clone(),
+                            None,
+                            error.to_string(),
+                        ),
+                        false,
+                    )?;
+                }
+                self.fail_turn(thread_id, &turn_id, error.to_string())?;
+                return Err(error);
+            }
+
+            if cancellation.is_cancelled() {
+                return self.cancel_turn(thread_id, &turn_id, &response.tool_calls);
+            }
 
             if response.tool_calls.is_empty() {
                 self.append(

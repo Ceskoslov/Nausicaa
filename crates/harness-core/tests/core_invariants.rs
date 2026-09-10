@@ -416,3 +416,148 @@ fn interrupted_execution_becomes_unknown_and_is_not_replayed() {
             .is_empty()
     );
 }
+
+#[test]
+fn abnormal_model_stops_never_complete_or_execute_tools() {
+    for stop_reason in [
+        StopReason::MaxTokens,
+        StopReason::Other,
+        StopReason::ToolUse,
+        StopReason::EndTurn,
+    ] {
+        for with_tools in [false, true] {
+            if (stop_reason == StopReason::ToolUse && with_tools)
+                || (stop_reason == StopReason::EndTurn && !with_tools)
+            {
+                continue;
+            }
+            let calls = if with_tools {
+                vec![ToolCall::new("echo", json!({ "message": "partial" }))]
+            } else {
+                vec![]
+            };
+            let model = Arc::new(ScriptedModel::new([ModelResponse {
+                content: "unfinished".into(),
+                tool_calls: calls.clone(),
+                stop_reason,
+                usage: TokenUsage::default(),
+            }]));
+            let store = Arc::new(MemoryEventStore::new());
+            let executions = Arc::new(AtomicUsize::new(0));
+            let runtime = runtime(
+                model,
+                store.clone(),
+                CapabilityPolicy::deny_by_default().grant("echo", Access::Allow),
+                executions.clone(),
+            );
+            let thread = runtime.start_thread().unwrap();
+            assert!(block_on(runtime.run_turn(&thread, "finish")).is_err());
+            assert_eq!(executions.load(Ordering::SeqCst), 0);
+            let events = store.load_thread(&thread).unwrap();
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e.event, RuntimeEvent::TurnCompleted { .. }))
+            );
+            assert!(matches!(
+                events.last().unwrap().event,
+                RuntimeEvent::TurnFailed { .. }
+            ));
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| matches!(e.event, RuntimeEvent::ToolReceiptRecorded { .. }))
+                    .count(),
+                calls.len()
+            );
+            assert!(
+                runtime
+                    .recover(&thread)
+                    .unwrap()
+                    .receipts_recorded
+                    .is_empty()
+            );
+        }
+    }
+}
+
+struct PendingModel;
+
+#[test]
+fn cancellation_during_model_call_prevents_successful_completion() {
+    struct CancellingModel(agent_harness_core::CancellationToken);
+    impl ModelAdapter for CancellingModel {
+        fn complete<'a>(
+            &'a self,
+            _: ModelRequest,
+        ) -> BoxFuture<'a, Result<ModelResponse, ModelError>> {
+            Box::pin(async {
+                self.0.cancel();
+                Ok(ModelResponse::text("late response"))
+            })
+        }
+    }
+    let cancellation = agent_harness_core::CancellationToken::new();
+    let runtime = AgentRuntime::new(
+        Arc::new(CancellingModel(cancellation.clone())),
+        Arc::new(MemoryEventStore::new()),
+        Arc::new(LayeredContextCompiler::new()),
+        ToolRegistry::new(),
+        Arc::new(CapabilityPolicy::deny_by_default()),
+    );
+    let thread = runtime.start_thread().unwrap();
+    assert!(matches!(
+        block_on(runtime.run_turn_with_cancellation(&thread, "work", cancellation)),
+        Err(RuntimeError::Cancelled(_))
+    ));
+    let events = runtime.events(&thread).unwrap();
+    assert!(matches!(
+        events.last().unwrap().event,
+        RuntimeEvent::TurnCancelled
+    ));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.event, RuntimeEvent::TurnCompleted { .. }))
+    );
+}
+
+impl ModelAdapter for PendingModel {
+    fn complete<'a>(&'a self, _: ModelRequest) -> BoxFuture<'a, Result<ModelResponse, ModelError>> {
+        Box::pin(std::future::pending())
+    }
+}
+
+#[test]
+fn recovery_rejects_active_turn_and_recovers_after_future_is_dropped() {
+    let runtime = AgentRuntime::new(
+        Arc::new(PendingModel),
+        Arc::new(MemoryEventStore::new()),
+        Arc::new(LayeredContextCompiler::new()),
+        ToolRegistry::new(),
+        Arc::new(CapabilityPolicy::deny_by_default()),
+    );
+    let thread = runtime.start_thread().unwrap();
+    {
+        let mut future = std::pin::pin!(runtime.run_turn(&thread, "work"));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(future.as_mut().poll(&mut context).is_pending());
+        let before = runtime.events(&thread).unwrap();
+        assert!(matches!(
+            runtime.recover(&thread),
+            Err(RuntimeError::ConcurrentTurn(_))
+        ));
+        assert_eq!(runtime.events(&thread).unwrap(), before);
+    }
+    assert_eq!(
+        runtime.recover(&thread).unwrap().turns_marked_failed.len(),
+        1
+    );
+    assert!(
+        runtime
+            .recover(&thread)
+            .unwrap()
+            .turns_marked_failed
+            .is_empty()
+    );
+}

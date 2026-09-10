@@ -82,6 +82,14 @@ pub struct TaskLease {
     pub expires_at_unix_ms: u64,
 }
 
+/// Identity of one claim. The attempt fences off results from earlier claims;
+/// it is not an authentication credential. Pass time from the trusted host.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LeaseToken {
+    pub worker_id: String,
+    pub attempt: u32,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TaskRecord {
     pub id: TaskId,
@@ -95,6 +103,16 @@ pub struct TaskRecord {
     pub delivery: DeliveryState,
     pub created_at_unix_ms: u64,
     pub updated_at_unix_ms: u64,
+}
+
+impl TaskRecord {
+    #[must_use]
+    pub fn lease_token(&self) -> Option<LeaseToken> {
+        self.lease.as_ref().map(|lease| LeaseToken {
+            worker_id: lease.worker_id.clone(),
+            attempt: self.attempt,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -157,6 +175,8 @@ pub enum LedgerError {
     Poisoned,
     #[error("task `{0}` does not exist")]
     UnknownTask(TaskId),
+    #[error("invalid lease for task `{task_id}`: {reason}")]
+    InvalidLease { task_id: TaskId, reason: String },
     #[error("invalid transition for task `{task_id}` from {status:?}: {operation}")]
     InvalidTransition {
         task_id: TaskId,
@@ -296,15 +316,18 @@ impl JsonlTaskLedger {
     pub fn heartbeat(
         &self,
         task_id: &TaskId,
-        worker_id: &str,
+        token: &LeaseToken,
+        now_unix_ms: u64,
         expires_at_unix_ms: u64,
     ) -> Result<TaskRecord, LedgerError> {
         let mut state = self.state.lock().map_err(|_| LedgerError::Poisoned)?;
         let task = require_task(&state, task_id)?;
-        if task.status != TaskStatus::Running
-            || task.lease.as_ref().map(|lease| lease.worker_id.as_str()) != Some(worker_id)
-        {
-            return Err(invalid(task, "heartbeat"));
+        let lease = require_lease(task, token, now_unix_ms)?;
+        if expires_at_unix_ms <= lease.expires_at_unix_ms {
+            return Err(LedgerError::InvalidLease {
+                task_id: task.id.clone(),
+                reason: "heartbeat must extend the current lease".to_owned(),
+            });
         }
         append_locked(
             &mut state,
@@ -316,9 +339,17 @@ impl JsonlTaskLedger {
         Ok(state.tasks[task_id].clone())
     }
 
-    pub fn succeed(&self, task_id: &TaskId, result: Value) -> Result<TaskRecord, LedgerError> {
+    pub fn succeed(
+        &self,
+        task_id: &TaskId,
+        token: &LeaseToken,
+        now_unix_ms: u64,
+        result: Value,
+    ) -> Result<TaskRecord, LedgerError> {
         self.finish(
             task_id,
+            token,
+            now_unix_ms,
             LedgerEvent::Succeeded {
                 task_id: task_id.clone(),
                 result,
@@ -329,10 +360,14 @@ impl JsonlTaskLedger {
     pub fn fail(
         &self,
         task_id: &TaskId,
+        token: &LeaseToken,
+        now_unix_ms: u64,
         error: impl Into<String>,
     ) -> Result<TaskRecord, LedgerError> {
         self.finish(
             task_id,
+            token,
+            now_unix_ms,
             LedgerEvent::Failed {
                 task_id: task_id.clone(),
                 error: error.into(),
@@ -340,12 +375,16 @@ impl JsonlTaskLedger {
         )
     }
 
-    fn finish(&self, task_id: &TaskId, event: LedgerEvent) -> Result<TaskRecord, LedgerError> {
+    fn finish(
+        &self,
+        task_id: &TaskId,
+        token: &LeaseToken,
+        now_unix_ms: u64,
+        event: LedgerEvent,
+    ) -> Result<TaskRecord, LedgerError> {
         let mut state = self.state.lock().map_err(|_| LedgerError::Poisoned)?;
         let task = require_task(&state, task_id)?;
-        if task.status != TaskStatus::Running {
-            return Err(invalid(task, "finish"));
-        }
+        require_lease(task, token, now_unix_ms)?;
         append_locked(&mut state, event)?;
         Ok(state.tasks[task_id].clone())
     }
@@ -435,6 +474,37 @@ impl JsonlTaskLedger {
             .cloned()
             .collect())
     }
+}
+
+fn require_lease<'a>(
+    task: &'a TaskRecord,
+    token: &LeaseToken,
+    now_unix_ms: u64,
+) -> Result<&'a TaskLease, LedgerError> {
+    if task.status != TaskStatus::Running {
+        return Err(invalid(task, "lease operation"));
+    }
+    let lease = task
+        .lease
+        .as_ref()
+        .ok_or_else(|| LedgerError::InvalidLease {
+            task_id: task.id.clone(),
+            reason: "running task has no lease".to_owned(),
+        })?;
+    let reason = if token.worker_id != lease.worker_id || token.attempt != task.attempt {
+        Some("worker or claim attempt does not match")
+    } else if now_unix_ms >= lease.expires_at_unix_ms {
+        Some("lease has expired")
+    } else {
+        None
+    };
+    if let Some(reason) = reason {
+        return Err(LedgerError::InvalidLease {
+            task_id: task.id.clone(),
+            reason: reason.to_owned(),
+        });
+    }
+    Ok(lease)
 }
 
 fn require_task<'a>(
@@ -605,7 +675,14 @@ mod tests {
         assert_eq!(first.task.id, second.task.id);
 
         let running = ledger.claim_next("worker", 100, 50).unwrap().unwrap();
-        let done = ledger.succeed(&running.id, json!({ "ok": true })).unwrap();
+        let done = ledger
+            .succeed(
+                &running.id,
+                &running.lease_token().unwrap(),
+                101,
+                json!({ "ok": true }),
+            )
+            .unwrap();
         assert_eq!(done.delivery, DeliveryState::Pending);
         let acknowledged = ledger.acknowledge_delivery(&running.id).unwrap();
         assert_eq!(acknowledged.delivery, DeliveryState::Acknowledged);
@@ -631,6 +708,97 @@ mod tests {
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].status, TaskStatus::Unknown);
         assert!(ledger.claim_next("other", 112, 10).unwrap().is_none());
+        drop(ledger);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn lease_operations_require_current_owner_attempt_and_unexpired_time() {
+        let (directory, ledger) = ledger();
+        ledger.submit("leased", json!({})).unwrap();
+        let running = ledger.claim_next("worker", 100, 50).unwrap().unwrap();
+        let token = running.lease_token().unwrap();
+        let wrong_worker = LeaseToken {
+            worker_id: "other".into(),
+            ..token.clone()
+        };
+        let old_attempt = LeaseToken {
+            attempt: token.attempt - 1,
+            ..token.clone()
+        };
+        for (claim, time) in [(&wrong_worker, 101), (&old_attempt, 101), (&token, 150)] {
+            assert!(matches!(
+                ledger.succeed(&running.id, claim, time, json!({})),
+                Err(LedgerError::InvalidLease { .. })
+            ));
+            assert!(matches!(
+                ledger.fail(&running.id, claim, time, "failure"),
+                Err(LedgerError::InvalidLease { .. })
+            ));
+            assert!(matches!(
+                ledger.heartbeat(&running.id, claim, time, 200),
+                Err(LedgerError::InvalidLease { .. })
+            ));
+            assert_eq!(ledger.get(&running.id).unwrap().unwrap(), running);
+        }
+        assert!(ledger.heartbeat(&running.id, &token, 101, 149).is_err());
+        assert!(ledger.heartbeat(&running.id, &token, 101, 150).is_err());
+        ledger.heartbeat(&running.id, &token, 149, 200).unwrap();
+        drop(ledger);
+        let ledger = JsonlTaskLedger::open(directory.join("tasks.jsonl")).unwrap();
+        let reloaded = ledger.get(&running.id).unwrap().unwrap();
+        assert_eq!(reloaded.lease_token().unwrap(), token);
+        assert_eq!(reloaded.lease.unwrap().expires_at_unix_ms, 200);
+        assert!(
+            ledger
+                .succeed(&running.id, &old_attempt, 160, json!({}))
+                .is_err()
+        );
+        let done = ledger
+            .succeed(&running.id, &token, 160, json!({ "ok": true }))
+            .unwrap();
+        assert_eq!(done.status, TaskStatus::Succeeded);
+        assert!(
+            ledger
+                .fail(&running.id, &token, 161, "late failure")
+                .is_err()
+        );
+        drop(ledger);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cancelled_and_recovered_tasks_reject_late_worker_results() {
+        for cancelled in [false, true] {
+            let (directory, ledger) = ledger();
+            ledger.submit("late", json!({})).unwrap();
+            let task = ledger.claim_next("worker", 100, 10).unwrap().unwrap();
+            let token = task.lease_token().unwrap();
+            if cancelled {
+                ledger.cancel(&task.id, "cancelled").unwrap();
+            } else {
+                ledger.recover_expired(110).unwrap();
+            }
+            let terminal = ledger.get(&task.id).unwrap().unwrap();
+            assert!(ledger.succeed(&task.id, &token, 111, json!({})).is_err());
+            assert!(ledger.fail(&task.id, &token, 111, "late").is_err());
+            assert!(ledger.heartbeat(&task.id, &token, 111, 200).is_err());
+            assert_eq!(ledger.get(&task.id).unwrap().unwrap(), terminal);
+            drop(ledger);
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn current_worker_can_record_failure() {
+        let (directory, ledger) = ledger();
+        ledger.submit("failed", json!({})).unwrap();
+        let task = ledger.claim_next("worker", 100, 50).unwrap().unwrap();
+        let failed = ledger
+            .fail(&task.id, &task.lease_token().unwrap(), 101, "known failure")
+            .unwrap();
+        assert_eq!(failed.status, TaskStatus::Failed);
+        assert_eq!(failed.error.as_deref(), Some("known failure"));
         drop(ledger);
         fs::remove_dir_all(directory).unwrap();
     }
