@@ -2,6 +2,8 @@
 
 The mandatory invariants live in `agent-harness-core`. Filesystem context, memory, process execution, provider integration, background work, the JSON-RPC control plane, and the terminal UI are optional crates. Applications can embed only the core or compose a complete local coding agent through the feature-gated `agent-harness` facade.
 
+This README covers setup and public usage. Read [ARCHITECTURE.md](ARCHITECTURE.md) for implemented boundaries and failure semantics, [AGENTS.md](AGENTS.md) for contribution instructions, and [ROADMAP.md](ROADMAP.md) for the verified reliability baseline and proposed next stages. Planned task acceptance, resumable execution, and multi-agent orchestration are not implemented APIs.
+
 ## Table of contents
 
 - [Design goals](#design-goals)
@@ -150,7 +152,7 @@ A turn proceeds as follows:
 5. Project the registered tools through policy and the optional parent capability ceiling.
 6. Compile context for the current iteration and run `before_model` hooks.
 7. Persist context/model-request events, invoke the `ModelAdapter`, validate tool-call IDs, and persist the assistant message.
-8. If the response contains no tool calls, persist `TurnCompleted` and return its content.
+8. Validate the stop reason: only `EndTurn` without tool calls completes successfully, and only `ToolUse` with calls can proceed to execution. Truncated or unrecognized stops fail the turn; partial output remains in the event log and any accepted calls receive denied receipts.
 9. For each tool call, check registration and policy, prepare the canonical action, and run `before_tool` hooks.
 10. If access is `Ask`, persist the approval request and resolution and require an exact action match.
 11. Persist `ToolExecutionStarted`, cross the configured executor boundary, and durably append the resulting receipt.
@@ -158,13 +160,15 @@ A turn proceeds as follows:
 
 The default limit is 32 model iterations per turn. Call IDs must be non-empty and unique for the entire turn. Hook failures and terminal turn states are also recorded as events.
 
+`MaxTokens` and `Other` return `RuntimeError::IncompleteModelResponse`; contradictory stop reasons and tool calls return `InvalidModelResponse`. The runtime does not automatically continue a truncated response. Cancellation is checked again after a model response, so a cancellation received during the model call cannot become successful completion.
+
 Cancellation is cooperative. The runtime checks the token before model iterations and tool calls, tools receive the same token in `ToolExecutionContext`, and any remaining unhandled calls receive denied receipts before the turn is marked cancelled.
 
 ## Getting started
 
 ### Prerequisites
 
-- Rust 1.85 or newer with Cargo.
+- Rust with Cargo. The verified reliability baseline uses Rust 1.98.0; the workspace declares a 1.85 minimum that has not yet been validated by an MSRV check.
 - `curl` on `PATH` when using the included provider transport.
 - Linux and `bwrap` when using the TUI's default shell runner.
 - An OpenAI-compatible Chat Completions endpoint and model name for live model calls.
@@ -352,6 +356,8 @@ Transcript compaction keeps complete groups from the end of the conversation. An
 
 The TUI configures a 1 MiB output cap for each process stream.
 
+On Unix, process runners create a separate process group and kill its remaining members on timeout or when the foreground command exits. Output pipes are drained without blocking, with at most a 250 ms cleanup window after termination begins; streams still open at that point are marked truncated. Background processes should use a separately managed execution instead of being orphaned from a foreground shell. A descendant that deliberately creates a new session can escape local process-group cleanup; bounded output draining still returns, but OS sandboxing is required for stronger containment.
+
 `BubblewrapRunner` is the default TUI backend. It unshares namespaces, does not share the network namespace by default, clears the environment, mounts `/usr`, `/bin`, `/lib`, and `/lib64` read-only when present, provides isolated `/proc`, `/dev`, and `/tmp`, and makes the workspace its only writable host bind. Additional read-only binds and network access must be enabled explicitly in code.
 
 `LocalProcessRunner` is an explicit unsandboxed alternative. File path and symlink checks reduce accidental workspace escape for `read_file` and `write_file`, but path validation alone is not equivalent to operating-system isolation.
@@ -359,6 +365,8 @@ The TUI configures a 1 MiB output cap for each process stream.
 ## Persistence and crash recovery
 
 The core includes `MemoryEventStore` for tests and ephemeral embeddings and `JsonlEventStore` for local persistence. Each JSONL append is written, flushed, and `sync_data`'d before it is reported as successful. Observers are notified only after that append succeeds.
+
+`JsonlEventStore::open` repairs an unterminated final record only when parsing fails due to unexpected EOF. It first durably archives the raw tail beside the log as `<log>.torn-<event-id>`, then truncates to the valid prefix. `recovered_tail_path()` exposes the archive path for that open. A complete final JSON record missing only its newline is preserved and the newline restored. Other corruption, including malformed newline-terminated records, remains an error. After an append I/O failure, that store instance rejects further writes until reopened. This tail-repair behavior currently applies to the core event store, not the separate memory or task-ledger JSONL stores.
 
 Important runtime events include thread and turn boundaries, user and assistant messages, compiled-context metadata, approval requests and decisions, prepared actions, execution starts, receipts, hook failures, cancellation, and terminal turn results. Replaying user, assistant, and receipt events reconstructs the model transcript.
 
@@ -372,6 +380,8 @@ Recovery deliberately closes incomplete protocol edges without replaying side ef
 | A receipt already exists | Leave the call unchanged. |
 
 Every interrupted open turn is then marked failed. `run_turn` performs recovery before starting new work on the thread, and callers can invoke recovery explicitly through the core API or app server.
+
+`AgentRuntime::recover` acquires the same per-thread guard as turn execution and returns `ConcurrentTurn` while the thread is active in that runtime. Dropping an interrupted turn future releases the guard and allows recovery. The low-level `recover_thread` function still requires callers to ensure exclusive ownership themselves; separate runtime/store instances need application-level coordination.
 
 The JSONL stores synchronize access within one process. They do not implement cross-process locking or distributed consensus.
 
@@ -430,6 +440,19 @@ terminal state -> delivery pending -> delivery acknowledged
 
 Submitting the same idempotency key returns the original task even if the new payload differs. Claiming increments the attempt count. An expired running lease becomes `unknown`, not `pending`, because its side effects may already have happened and automatic replay would be unsafe.
 
+`heartbeat`, `succeed`, and `fail` require a `LeaseToken` from the claimed task and the current time in Unix milliseconds supplied by the trusted host. Both worker identity and claim attempt must match, and `now_unix_ms` must be strictly earlier than the current expiry. Heartbeats must extend that expiry; an expired lease cannot be revived even before `recover_expired` runs. The token identifies a claim, not an authenticated user. Existing serialized ledger records remain compatible because tokens are derived from the existing worker and attempt fields.
+
+The worker API now takes `(task_id, token, now_unix_ms, ...)`; migrate callers that previously passed only a task ID or worker name. In this example, `ledger` is an existing `JsonlTaskLedger` and `now_ms()` reads the trusted host clock:
+
+```rust
+if let Some(task) = ledger.claim_next("worker-1", now_ms(), 30_000)? {
+    let token = task.lease_token().expect("claimed task has a lease");
+    let now = now_ms();
+    ledger.heartbeat(&task.id, &token, now, now + 60_000)?;
+    ledger.succeed(&task.id, &token, now_ms(), serde_json::json!({ "ok": true }))?;
+}
+```
+
 The ledger is a storage/state-machine component. It does not include a resident worker service, gateway, scheduler, or channel router.
 
 ## OpenAI-compatible provider details
@@ -453,19 +476,22 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --offl
 
 Remove `--offline` when dependencies are not already cached.
 
-The core integration tests cover capability restriction, exact-action approval, receipt ordering, cancellation, recovery, durable JSONL replay, hierarchical rules, deterministic compaction, and context limits. Optional crates also contain focused unit tests for their adapters and state machines.
+The core integration tests cover capability restriction, exact-action approval, receipt ordering, abnormal model stops, cancellation, exclusive recovery, durable JSONL replay and torn-tail repair, and hierarchical rules. Optional crates test deterministic compaction, process-group cleanup and bounded output, lease ownership/expiry, and their adapters and state machines. Process tests require Unix process and local IPC facilities; a restricted environment may need an appropriately permitted test runner. Default tests do not require live model credentials.
 
 ## Current limitations
 
+- Normal turn completion is not independent task acceptance. A task specification, completion gate, and task-quality evaluation runner are proposed in [ROADMAP.md](ROADMAP.md), not yet implemented.
 - The included provider supports non-streaming Chat Completions only. Its curl transport is blocking, and the core does not automatically retry `ModelError` values marked retryable.
-- Deterministic compaction drops complete old message groups and records the count; it does not generate a semantic summary.
+- Deterministic compaction drops complete old message groups and records the count; it does not generate a semantic summary. The character cap is an approximate byte-size check, not a token budget for the full provider request.
 - JSONL stores provide synchronized append and `sync_data` durability within one process, not cross-process distributed locking.
+- Only the core event store repairs incomplete final JSONL records; the memory and task-ledger stores still reject malformed tails.
 - Bubblewrap is the only included operating-system sandbox and is Linux-specific. Container, VM, SSH, and cloud-sandbox executors remain extension points.
 - Cancellation is cooperative. A blocking provider or process runner may not observe it until the current blocking operation returns.
 - The app server's background-turn status table is process-local even when runtime events use durable storage.
 - The task ledger has recovery semantics but no resident gateway, routing layer, or distributed worker implementation.
 - Parent/child capability intersection is implemented, but a complete subagent/worktree scheduler is not included.
 - Workspace path and symlink validation are defense-in-depth checks, not substitutes for a process sandbox.
+- The manifest's declared Rust minimum is not yet covered by verification or a CI matrix.
 
 ## Repository layout
 
