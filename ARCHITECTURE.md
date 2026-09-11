@@ -242,7 +242,10 @@ policy-hidden writer to exercise rejection. This is deterministic fault injectio
 not a measurement of real model behavior or filesystem containment.
 
 The optional `live` CLI feature requires explicit pinned model/deployment metadata
-and records provider settings separately from credentials. Pin validity belongs
+and records provider settings separately from credentials. Its optional
+`timeout_seconds` accepts 1–300 seconds; omitted values retain the original
+30-second default, and reports record the effective value. This additive live
+configuration field changes no journal or report schema version. Pin validity belongs
 to the host. Live runs skip the scripted interruption fixture and report the skip;
 default tests never use network or credentials. Schema-version-1 reports are new
 artifacts and change no existing durable formats. Package version plus retained

@@ -75,7 +75,8 @@ Compile the `live` feature and supply an explicit configuration file:
 {
   "endpoint": "https://your-provider.example/v1/chat/completions",
   "model_snapshot": "your-immutable-model-snapshot-id",
-  "revision": "your-immutable-provider-deployment-revision"
+  "revision": "your-immutable-provider-deployment-revision",
+  "timeout_seconds": 120
 }
 ```
 
@@ -91,7 +92,11 @@ cargo run -p agent-harness-eval --features live --offline -- \
 
 `--offline` only controls Cargo; this explicit live mode makes provider requests.
 The CLI records the non-secret live configuration, uses temperature 0, a 1024
-completion-token cap, and a 30-second transport timeout. It skips the synthetic
+completion-token cap, and a configurable transport timeout. `timeout_seconds`
+accepts 1–300 seconds and defaults to the original 30 seconds when omitted. Both
+the retained configuration and summary record the effective timeout. Increase it
+explicitly for endpoints whose response latency exceeds the default; transport
+timeouts are infrastructure failures, not evidence of model task quality. It skips the synthetic
 interruption fixture and records that omission. Other fixtures run against fresh
 adapter instances for each mode. Live calls are sequential, not automatically
 retried, and not part of the default tests. No live run was used for the baseline.
