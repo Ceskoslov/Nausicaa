@@ -1,8 +1,8 @@
 # Nausicaa development roadmap
 
 Baseline: 2026-09-11, reliability commit `8bb9e1e`. This is a development plan,
-not a list of implemented APIs. The current task stops after the reliability and
-documentation commits; later stages remain future work.
+not a list of implemented APIs. Development now continues with the optional
+task-acceptance baseline; later stages remain gated by their acceptance evidence.
 
 ## 1. Reliability baseline — completed within the reviewed scope
 
@@ -30,14 +30,18 @@ resumption, no immediate cancellation of blocking calls, no tail repair in memor
 or task-ledger stores, and no guaranteed cleanup of local processes that escape
 their process group. See [ARCHITECTURE.md](ARCHITECTURE.md).
 
-## 2. Task acceptance and an evaluation baseline — proposed next
+## 2. Task acceptance and an evaluation baseline — in progress
 
 **Objective:** distinguish "the model ended a turn" from "the requested work has
 verifiable completion evidence."
 
-Proposed concepts, not current APIs: `TaskSpec`, `CompletionGate`, `Budget`, and
-`ArtifactRef`. Start with an optional task layer and a deterministic checker; an
-LLM reviewer is not a prerequisite. Keep the normal embeddable core turn API.
+Implemented first slice: optional `agent-harness-task` (facade feature `task`)
+provides `TaskSpec`, `CompletionGate`, attempt `Budget`, retained `ArtifactRef`
+snapshots, and a versioned `TaskJournal`. Required exact-content checks fail
+closed; unknown receipts block progress; replay never retries a running attempt.
+The normal embeddable core turn API is unchanged. Six deterministic regression
+tests cover repair, budget exhaustion, receipt retention, interrupted attempts,
+invalid replay, and append failure. The evaluation runner is the next slice.
 
 - Store the objective, explicit acceptance criteria, artifact references,
   verification evidence, and remaining work independently of chat history.
@@ -54,10 +58,12 @@ a budget; denied and unknown actions remain correctly recorded. Demonstrate a
 small coding task that fails verification, is repaired, and then passes. Run the
 same fixtures against the core-only baseline and the task layer.
 
-**Decisions before implementation:** which task transitions are durable events,
-who controls acceptance criteria, how artifacts are identified and retained, and
-how gate feedback enters context without modifying policy. The first evaluation
-runner should measure these decisions before broadening the abstraction.
+**Initial decisions:** creation, attempt-start, verification inputs, and explicit
+blocking are durable version-1 task events. The trusted host fixes criteria and
+captures UTF-8 artifacts under logical IDs; complete snapshots are retained inline.
+The gate recomputes exact-content evidence on replay. Repair feedback is advisory
+context supplied by the host. See [ARCHITECTURE.md](ARCHITECTURE.md#task-acceptance).
+The evaluation runner must measure this narrow baseline before broadening it.
 
 ## 3. Sustained execution — proposed after the task baseline
 

@@ -8,6 +8,7 @@ members = [
     "crates/memory",
     "crates/provider-openai",
     "crates/task-ledger",
+    "crates/task",
     "crates/tui",
 ]
 resolver = "3"
@@ -25,6 +26,7 @@ agent-harness-executor-process = { path = "crates/executor-process" }
 agent-harness-memory = { path = "crates/memory" }
 agent-harness-provider-openai = { path = "crates/provider-openai" }
 agent-harness-task-ledger = { path = "crates/task-ledger" }
+agent-harness-task = { path = "crates/task" }
 agent-harness-tui = { path = "crates/tui" }
 crossterm = "0.29.0"
 serde = { version = "1.0.228", features = ["derive"] }

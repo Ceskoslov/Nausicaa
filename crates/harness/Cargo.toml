@@ -14,6 +14,7 @@ memory = ["dep:agent-harness-memory"]
 process-executor = ["dep:agent-harness-executor-process"]
 provider-openai = ["dep:agent-harness-provider-openai"]
 task-ledger = ["dep:agent-harness-task-ledger"]
+task = ["dep:agent-harness-task"]
 tui = ["dep:agent-harness-tui"]
 full = [
     "app-server",
@@ -22,6 +23,7 @@ full = [
     "process-executor",
     "provider-openai",
     "task-ledger",
+    "task",
     "tui",
 ]
 
@@ -33,5 +35,5 @@ agent-harness-executor-process = { workspace = true, optional = true }
 agent-harness-memory = { workspace = true, optional = true }
 agent-harness-provider-openai = { workspace = true, optional = true }
 agent-harness-task-ledger = { workspace = true, optional = true }
+agent-harness-task = { workspace = true, optional = true }
 agent-harness-tui = { workspace = true, optional = true }
-

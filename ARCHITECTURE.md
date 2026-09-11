@@ -1,7 +1,7 @@
 # Nausicaa architecture
 
-This document describes the implemented system after the reliability changes in
-`8bb9e1e`. Future capabilities are tracked separately in [ROADMAP.md](ROADMAP.md).
+This document describes the reliability baseline and subsequent implemented task
+acceptance layer. Future capabilities are tracked separately in [ROADMAP.md](ROADMAP.md).
 See [README.md](README.md) for setup and API usage, and [AGENTS.md](AGENTS.md) for
 contribution constraints.
 
@@ -31,6 +31,7 @@ flowchart TD
 | `memory` | Advisory records, lexical recall, bounded per-turn recall cache | Authorization or a durable task plan |
 | `executor-process` | File tools, shell preparation, local and Bubblewrap process runners | Distributed execution or universal process containment |
 | `provider-openai` | Chat Completions mapping and replaceable HTTP transport | Streaming, runtime retry policy, task completion |
+| `task` | Immutable task criteria, deterministic acceptance, attempt budgets, retained evidence and task journal | Tool authority, worker scheduling, automatic resumption |
 | `task-ledger` | Idempotent submission, claims, leases, terminal results, delivery acknowledgement | A running worker service or automatic task retries |
 | `app-server` | Line-oriented JSON-RPC control and in-process background-turn tracking | Durable scheduler state |
 | `tui` | Terminal interaction, event display, interactive approvals | Core authority or crash-resumable task orchestration |
@@ -182,3 +183,42 @@ evaluation, and orchestration optional. Future task completion must be distinct
 from normal model turn completion. Future resumption must reconcile uncertain
 actions rather than retrying them implicitly. The ordered acceptance criteria and
 unresolved design choices are in [ROADMAP.md](ROADMAP.md).
+
+## Task acceptance
+
+The optional [task crate](crates/task/src/lib.rs) sits outside the core turn loop.
+The host creates an immutable `TaskSpec` with a nonempty objective, required
+criteria, and a positive attempt budget. `CompletionGate` compares retained UTF-8
+artifact snapshots against exact expected contents. Missing or duplicate snapshots
+fail the associated check. This first checker suits small deterministic fixtures;
+it does not compile arbitrary programs or claim general coding quality.
+
+`TaskJournal` owns one task per exclusively owned JSONL file. Version 1 records
+creation, attempt start (with a host-supplied core turn ID), verification inputs
+(artifact snapshots and receipts), and explicit blocking. Replay validates the
+version, sequence, specification and transitions, and derives evidence using the
+version-1 checker. Changes to that checker require a new journal version, never
+reinterpretation of existing evidence. Existing core, memory and ledger formats
+and public signatures are unchanged; the facade adds an opt-in `task` feature.
+
+An attempt is synced before generation. Verification still runs on the final
+allowed attempt, so generation cannot consume the verification opportunity.
+Failing checks produce actionable remaining work or terminal budget exhaustion.
+Passing checks produce success only if no supplied receipt is unknown; unknown
+outcomes block the task without retry. Denied receipts are preserved and do not
+independently prevent success if all artifact criteria pass. Terminal states have
+no reopen or retry API. Interrupted running attempts remain running after replay;
+the host must reconcile them, supply known evidence, or explicitly block them.
+
+The trusted host must supply complete receipts from the associated turn and
+capture artifacts independently of model claims. Logical artifact IDs are not
+paths the task crate opens; complete contents are retained in the task journal,
+so evidence does not depend on later workspace edits. Repair feedback is ordinary
+context for a subsequent core turn and cannot modify policy, grants or approvals.
+This API is a trusted embedding boundary, not authentication for untrusted clients.
+
+Writes sync before state publication; any I/O failure disables further writes on
+that instance. Malformed or unterminated journals fail closed without tail repair.
+No cross-instance locking, transactional link to the core log, automatic scheduler,
+size limit, wall-clock limit or token budget is supplied here. Hosts own retention,
+exclusive file ownership, execution limits and sensitive artifact handling.

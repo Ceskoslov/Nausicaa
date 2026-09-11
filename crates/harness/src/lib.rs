@@ -13,6 +13,8 @@ pub use agent_harness_executor_process as process_executor;
 pub use agent_harness_memory as memory;
 #[cfg(feature = "provider-openai")]
 pub use agent_harness_provider_openai as provider_openai;
+#[cfg(feature = "task")]
+pub use agent_harness_task as task;
 #[cfg(feature = "task-ledger")]
 pub use agent_harness_task_ledger as task_ledger;
 #[cfg(feature = "tui")]

@@ -2,7 +2,7 @@
 
 The mandatory invariants live in `agent-harness-core`. Filesystem context, memory, process execution, provider integration, background work, the JSON-RPC control plane, and the terminal UI are optional crates. Applications can embed only the core or compose a complete local coding agent through the feature-gated `agent-harness` facade.
 
-This README covers setup and public usage. Read [ARCHITECTURE.md](ARCHITECTURE.md) for implemented boundaries and failure semantics, [AGENTS.md](AGENTS.md) for contribution instructions, and [ROADMAP.md](ROADMAP.md) for the verified reliability baseline and proposed next stages. Planned task acceptance, resumable execution, and multi-agent orchestration are not implemented APIs.
+This README covers setup and public usage. Read [ARCHITECTURE.md](ARCHITECTURE.md) for implemented boundaries and failure semantics, [AGENTS.md](AGENTS.md) for contribution instructions, and [ROADMAP.md](ROADMAP.md) for the verified reliability baseline and proposed next stages. Optional deterministic task acceptance is available; resumable execution and multi-agent orchestration remain planned.
 
 ## Table of contents
 
@@ -17,6 +17,7 @@ This README covers setup and public usage. Read [ARCHITECTURE.md](ARCHITECTURE.m
 - [Workspace tools and process isolation](#workspace-tools-and-process-isolation)
 - [Persistence and crash recovery](#persistence-and-crash-recovery)
 - [JSON-RPC app server](#json-rpc-app-server)
+- [Task acceptance](#task-acceptance)
 - [Background task ledger](#background-task-ledger)
 - [OpenAI-compatible provider details](#openai-compatible-provider-details)
 - [Development and verification](#development-and-verification)
@@ -85,6 +86,7 @@ The main extension seams are:
 | `agent-harness-memory` | `memory` / `memory` | In-memory or JSONL advisory memory, lexical recall, and a frozen recall snapshot for each turn. |
 | `agent-harness-executor-process` | `process-executor` / `process_executor` | Workspace-scoped file tools plus explicit local and Linux Bubblewrap process runners. |
 | `agent-harness-provider-openai` | `provider-openai` / `provider_openai` | Non-streaming OpenAI-compatible Chat Completions mapping with a replaceable HTTP transport. |
+| `agent-harness-task` | `task` / `task` | Immutable criteria, exact-content acceptance, attempt budgets, retained artifacts, and a versioned task journal. |
 | `agent-harness-task-ledger` | `task-ledger` / `task_ledger` | Idempotent background-task submission, worker leases, heartbeat, cancellation, recovery, and delivery acknowledgement. |
 | `agent-harness-app-server` | `app-server` / `app_server` | Line-oriented JSON-RPC 2.0 thread and turn control plane. |
 | `agent-harness-tui` | `tui` / `tui` | Crossterm UI, background turns, event display, cancellation, and interactive exact-action approval. |
@@ -415,6 +417,42 @@ After `turn/start`, clients can poll `turn/status` and incrementally read durabl
 
 The server uses standard JSON-RPC codes for parse errors, invalid requests, unknown methods, invalid parameters, and internal runtime errors.
 
+## Task acceptance
+
+Enable facade feature `task` or depend on `agent-harness-task`. The core turn API
+remains unchanged. A trusted host can record independent acceptance:
+
+```rust
+use agent_harness_task::{ArtifactRef, Budget, Criterion, TaskJournal, TaskSpec};
+
+let mut task = TaskJournal::create("task.jsonl", TaskSpec {
+    objective: "Produce a greeting".into(),
+    criteria: vec![Criterion {
+        id: "greeting".into(),
+        artifact_id: "greeting.txt".into(),
+        expected: "hello\n".into(),
+    }],
+    budget: Budget { max_attempts: 2 },
+})?;
+task.start_attempt("host-generated-core-turn-id")?; // before generation
+// Run the core turn; collect all its receipts and independently read artifacts.
+task.verify(vec![ArtifactRef {
+    id: "greeting.txt".into(),
+    content: std::fs::read_to_string("greeting.txt")?,
+}], receipts)?;
+println!("{:?}: {:?}", task.state().status, task.state().remaining_work);
+```
+
+`receipts` above is the complete `Vec<ToolReceipt>` from the associated core turn.
+Only `NeedsRepair` permits another attempt; supply `remaining_work` as advisory
+context while keeping the same policy. The last attempt still gets verified.
+Missing, duplicate or mismatching required artifacts cannot succeed; unknown
+receipts block the task. All supplied receipts and UTF-8 snapshots are retained.
+`TaskJournal::open` replays validated version-1 records; an interrupted running
+attempt must be reconciled by the host or explicitly blocked, never blindly retried.
+The host owns exclusive journal access and snapshot retention. This separate
+format changes no existing core or task-ledger records.
+
 ## Background task ledger
 
 `JsonlTaskLedger` is a separate durable primitive for work that outlives an interactive turn. It supports:
@@ -480,7 +518,7 @@ The core integration tests cover capability restriction, exact-action approval, 
 
 ## Current limitations
 
-- Normal turn completion is not independent task acceptance. A task specification, completion gate, and task-quality evaluation runner are proposed in [ROADMAP.md](ROADMAP.md), not yet implemented.
+- Normal turn completion is not independent task acceptance. The optional task layer checks exact artifact contents supplied by a trusted host; it is not a general code evaluator or automatic scheduler. The evaluation runner remains the next roadmap slice.
 - The included provider supports non-streaming Chat Completions only. Its curl transport is blocking, and the core does not automatically retry `ModelError` values marked retryable.
 - Deterministic compaction drops complete old message groups and records the count; it does not generate a semantic summary. The character cap is an approximate byte-size check, not a token budget for the full provider request.
 - JSONL stores provide synchronized append and `sync_data` durability within one process, not cross-process distributed locking.
@@ -503,6 +541,7 @@ crates/
 ├── memory/             # Optional advisory long-term memory
 ├── executor-process/   # Optional file tools and process backends
 ├── provider-openai/    # Optional OpenAI-compatible adapter
+├── task/               # Optional deterministic task acceptance
 ├── task-ledger/        # Optional durable background-task state machine
 ├── app-server/         # Optional JSON-RPC control plane
 └── tui/                # Optional Crossterm library and executable

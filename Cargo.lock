@@ -12,6 +12,7 @@ dependencies = [
  "agent-harness-executor-process",
  "agent-harness-memory",
  "agent-harness-provider-openai",
+ "agent-harness-task",
  "agent-harness-task-ledger",
  "agent-harness-tui",
 ]
@@ -70,6 +71,16 @@ name = "agent-harness-provider-openai"
 version = "0.1.0"
 dependencies = [
  "agent-harness-core",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "agent-harness-task"
+version = "0.1.0"
+dependencies = [
+ "agent-harness-core",
+ "serde",
  "serde_json",
  "thiserror",
 ]

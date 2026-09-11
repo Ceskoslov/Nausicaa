@@ -1,0 +1,13 @@
+[package]
+name = "agent-harness-task"
+version = "0.1.0"
+description = "Optional durable deterministic task acceptance"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+agent-harness-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
