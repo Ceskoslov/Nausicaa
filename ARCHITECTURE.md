@@ -27,7 +27,7 @@ flowchart TD
 | --- | --- | --- |
 | `harness-core` | Model/tool protocols, thread/turn loop, policy, approvals, hooks, events, receipts, recovery; memory and JSONL event stores | Provider transport, OS sandbox, task acceptance |
 | `harness` | Feature-gated re-exports; empty default feature set | Another agent loop |
-| `context-fs` | Hierarchical rules, skill index/selection, complete-group transcript window | Semantic summarization or token accounting |
+| `context-fs` | Hierarchical rules, skill index/selection, complete-group transcript window, optional output archive and paginated retrieval | Semantic summarization or model tokenization |
 | `memory` | Advisory records, lexical recall, bounded per-turn recall cache | Authorization or a durable task plan |
 | `executor-process` | File tools, shell preparation, local and Bubblewrap process runners | Distributed execution or universal process containment |
 | `provider-openai` | Chat Completions mapping and replaceable HTTP transport | Streaming, runtime retry policy, task completion |
@@ -280,5 +280,40 @@ unbudgeted. One intentional mapping correction applies to all adapters:
 only policy-projected registered schemas can be exposed. `tool_choice` is also
 removed when the projection is empty. Hosts that injected schemas through extra
 fields must register/grant them through the core instead. Model tokenization is
-host-supplied; automatic compaction, output externalization, and aggregate spending
-limits remain separate work.
+host-supplied; automatic token-driven compaction and aggregate spending limits remain separate
+work. Output externalization is described below.
+
+
+## Archived tool output
+
+The opt-in `ExternalOutputCompiler` in `context-fs` archives oversized serialized
+receipt output before passing a cloned transcript to its inner compiler. The
+resulting version-1 reference contains the original call ID, byte size, JSON
+format and retrieval tool name. Call/receipt grouping, status, canonical action,
+errors, and the core event log remain unchanged. Wrap it with `TaskContextCompiler`
+to pin the task contract after compaction, then apply final provider accounting.
+An integration fixture drops old chat and externalizes a 55 KB output while
+retaining the contract and call/receipt pair within the final test-counter budget.
+
+`OutputArchive` uses a trusted host directory outside tool-writable workspaces.
+Thread and call IDs are injectively hex-encoded into separate bounded path
+components (1–96 UTF-8 bytes per ID). Each snapshot contains the original JSON
+value. A new file is fully written and synced under a private temporary name,
+then hard-linked to its final name without overwrite; Unix directory sync occurs
+before publishing the reference. Normal failures clean temporary files; crashes
+may leave unreferenced `.pending-*` files for host cleanup. Repeated compilation
+checks and reuses the same bytes. Conflicts, oversize output, unsupported hard links,
+symlinked entries, and I/O failures reject compilation without silent data loss.
+There is no cross-instance lock or protection against a hostile owner racing path
+checks. This is storage lifecycle management, not an OS sandbox or tamper-proof CAS.
+
+`ReadOutputTool` is registered and authorized explicitly, using the normal policy,
+preparation, approval, executor, and receipt path. Preparation binds the current
+thread and exact call ID/byte offset/page size; execution cannot select another
+thread from model arguments. Pages are bounded to 4096 UTF-8 bytes, report a next
+byte offset, and never split a character. Invalid offsets fail. Retrieval outputs
+are not recursively externalized. Durable receipt output is still fully available
+for independent task evidence; task journal snapshots are not replaced by these
+context references. Old compacted references are not automatically indexed, and
+retention/garbage collection remains a host responsibility. This new archive and
+reference format does not migrate or rewrite any existing journal.

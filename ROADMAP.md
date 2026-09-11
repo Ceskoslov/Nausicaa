@@ -81,7 +81,7 @@ artifacts are UTF-8 snapshots, the oracle is exact content, budgets count attemp
 and live model quality has not been measured. General semantic checkers, stronger
 artifact retention, and real model comparisons need their own measured changes.
 
-## 3. Sustained execution — context slice in progress
+## 3. Sustained execution — context baseline implemented
 
 Deliver these as separate reviewable changes, not one large runtime replacement.
 
@@ -96,7 +96,9 @@ Deliver these as separate reviewable changes, not one large runtime replacement.
 
 **Implemented context slice:** `TaskContextCompiler` pins the immutable objective
 and required criteria after transcript compaction without altering call/receipt
-groups. The optional provider `RequestBudget` checks the exact final request using
+groups. `ExternalOutputCompiler` now retains long output in immutable per-thread
+archives, substitutes versioned context references, and offers explicitly
+authorized `read_output` pages. The optional provider `RequestBudget` checks the exact final request using
 a trusted model-specific `RequestTokenCounter`, reserving bounded output capacity
 and rejecting over-budget or uncountable requests before transport. Tool schema
 size and extension fields are covered. Provider extensions can no longer restore
@@ -104,9 +106,14 @@ hidden tools when the core projection is empty.
 
 Focused regression coverage includes compacted-away initial instructions, preserved
 denied call/receipt groups, oversized schemas, exact budget boundaries, invalid
-output caps, counting errors, and extra-body schema injection. This is not the
-whole Context row: externalized outputs and on-demand retrieval remain pending,
-as do a production tokenizer and cumulative task time/token budgets.
+output caps, counting errors, and extra-body schema injection. Archive tests cover
+Unicode paging, snapshot reuse/conflicts, symlink rejection, exact prepared
+retrieval, and denied access. A combined fixture drops old history and externalizes
+55 KB of output while retaining task constraints and call/receipt integrity under
+a final-request test-counter budget. This satisfies the Context row at the
+embedding boundary; production model tokenizers, token-driven automatic
+compaction, archive indexing/GC, and cumulative task budgets remain extensions.
+The next ordered implementation area is Editing tools.
 
 Reserve verification time in a task budget rather than spending the entire budget
 on generation. Automatic compaction or resumption must preserve user constraints

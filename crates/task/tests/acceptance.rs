@@ -198,3 +198,118 @@ fn task_contract_survives_compaction_without_changing_call_receipt_groups() {
             .any(|m| matches!(m, TranscriptMessage::User { .. }))
     );
 }
+
+#[test]
+fn long_output_and_compacted_history_fit_final_request_with_contract_and_receipts() {
+    use agent_harness_context_fs::{
+        ExternalOutputCompiler, FsContextCompiler, FsContextConfig, OutputArchive,
+    };
+    use agent_harness_core::*;
+    use agent_harness_provider_openai::*;
+    use agent_harness_task::TaskContextCompiler;
+    use std::future::Future;
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll, Waker};
+    struct Counter;
+    impl RequestTokenCounter for Counter {
+        fn count_input_tokens(&self, body: &serde_json::Value) -> Result<u64, ModelError> {
+            // Deterministic byte oracle for the integration fixture only.
+            Ok(serde_json::to_vec(body).unwrap().len() as u64)
+        }
+    }
+    struct Transport(Mutex<Vec<serde_json::Value>>);
+    impl HttpTransport for Transport {
+        fn post_json(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
+            self.0.lock().unwrap().push(request.body);
+            Ok(HttpResponse {
+                status: 200,
+                body: serde_json::json!({"choices": [{"message": {"content": "done"}, "finish_reason": "stop"}]}),
+            })
+        }
+    }
+    let fixture = Fixture::new();
+    let workspace = fixture.0.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let archive = Arc::new(OutputArchive::new(fixture.0.join("archive"), 100_000).unwrap());
+    let mut config = FsContextConfig::new(&workspace, &workspace);
+    config.max_transcript_groups = Some(1);
+    let compiler = TaskContextCompiler::new(
+        Arc::new(ExternalOutputCompiler::new(
+            Arc::new(FsContextCompiler::new(config)),
+            archive.clone(),
+            256,
+        )),
+        &spec(2),
+    )
+    .unwrap();
+    let thread = ThreadId::new();
+    let call = ToolCall::new("logs", serde_json::json!({}));
+    let receipt = ToolReceipt::succeeded(
+        PreparedToolCall {
+            call_id: call.id.clone(),
+            action: CanonicalAction::new(
+                "logs",
+                serde_json::json!({}),
+                EffectKind::ReadOnly,
+                RetrySafety::Safe,
+            ),
+        },
+        serde_json::json!("long output".repeat(5000)),
+    );
+    let compiled = compiler
+        .compile(ContextInput {
+            thread_id: thread.clone(),
+            turn_id: TurnId::new(),
+            transcript: vec![
+                TranscriptMessage::User {
+                    content: "old chat".repeat(10_000),
+                },
+                TranscriptMessage::Assistant {
+                    content: String::new(),
+                    tool_calls: vec![call.clone()],
+                },
+                TranscriptMessage::Tool {
+                    receipt: receipt.clone(),
+                },
+            ],
+        })
+        .unwrap();
+    assert_eq!(compiled.messages.len(), 2);
+    assert!(compiled.prompt.iter().any(|s| s.name == "task-contract-v1"));
+    assert_eq!(receipt.output.unwrap().as_str().unwrap().len(), 55_000);
+    assert_eq!(
+        archive
+            .read_page(&thread, call.id.as_str(), 0, 256)
+            .unwrap()["total_bytes"],
+        55_002
+    );
+    let transport = Arc::new(Transport(Mutex::new(vec![])));
+    let adapter = OpenAiCompatibleAdapter::new(
+        OpenAiConfig::new("https://example.test", "fixture-byte-counter"),
+        transport.clone(),
+    )
+    .with_request_budget(
+        RequestBudget {
+            context_window_tokens: 3000,
+            reserved_output_tokens: 100,
+        },
+        Arc::new(Counter),
+    )
+    .unwrap();
+    let mut future = Box::pin(adapter.complete(ModelRequest {
+        thread_id: thread,
+        turn_id: TurnId::new(),
+        iteration: 0,
+        context: compiled,
+        tools: vec![],
+    }));
+    assert!(matches!(
+        future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Ok(_))
+    ));
+    let requests = transport.0.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(serde_json::to_vec(&requests[0]).unwrap().len() <= 2900);
+}

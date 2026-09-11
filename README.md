@@ -82,7 +82,7 @@ The main extension seams are:
 | --- | --- | --- |
 | `agent-harness-core` | Always available as `agent_harness::core` | Thread/turn loop, model and tool protocols, capability projection, exact approval, hooks, cancellation, events, durable receipts, and recovery. |
 | `agent-harness` | N/A | Feature-gated facade. It enables no optional features by default. |
-| `agent-harness-context-fs` | `context-fs` / `context_fs` | Hierarchical `AGENTS.md` rules, skill discovery and selection, transcript compaction, and context-size enforcement. |
+| `agent-harness-context-fs` | `context-fs` / `context_fs` | Hierarchical `AGENTS.md` rules, skill discovery and selection, transcript compaction, optional archived output retrieval, and context-size enforcement. |
 | `agent-harness-memory` | `memory` / `memory` | In-memory or JSONL advisory memory, lexical recall, and a frozen recall snapshot for each turn. |
 | `agent-harness-executor-process` | `process-executor` / `process_executor` | Workspace-scoped file tools plus explicit local and Linux Bubblewrap process runners. |
 | `agent-harness-provider-openai` | `provider-openai` / `provider_openai` | Non-streaming OpenAI-compatible Chat Completions mapping with a replaceable HTTP transport. |
@@ -324,6 +324,35 @@ A skill root may contain Markdown files or child directories containing `SKILL.m
 
 Transcript compaction keeps complete groups from the end of the conversation. An assistant message containing tool calls and its following receipts form one indivisible group, so compaction does not intentionally separate a request from its result. The compiler reports how many groups were omitted and never invents a semantic summary. An optional character budget fails context compilation when the retained prompt and transcript are still too large.
 
+### Long tool outputs
+
+`ExternalOutputCompiler` replaces large tool `output` values in cloned model
+context with version-1 archive references before inner compilation. It preserves
+call IDs, receipt status, action, errors and the original durable receipt. For
+example, compose a filesystem compiler and an archive outside the tool workspace:
+
+```rust
+let archive = Arc::new(OutputArchive::new("/host/private/task-outputs", 16 * 1024 * 1024)?);
+let compiler = ExternalOutputCompiler::new(base_compiler, archive.clone(), 4096);
+// If using task acceptance, wrap this with TaskContextCompiler as the outermost layer.
+tools.register(ReadOutputTool::new(archive))?;
+// The host must separately grant read_output access through its normal policy.
+```
+
+These types are re-exported by `agent_harness::context_fs`. `read_output` accepts
+`call_id`, optional byte `offset` (default 0), and `limit` (default 2048; 4–4096).
+It reads only the current thread's archive. Pages report `text`, `next_offset`,
+`total_bytes`, and `eof`; join text pages to recover the serialized JSON output.
+UTF-8 boundaries are preserved. Retrieval pages are not externalized again.
+
+Snapshots are immutable under `(thread_id, call_id)` and survive reopening.
+Conflicts and storage failures fail context compilation. The archive requires a
+trusted exclusively owned directory and filesystem hard links; IDs over 96 UTF-8
+bytes are rejected rather than truncated. The host owns retention and cleanup of
+unpublished `.pending-*` files after a crash. This reduces request size, not the
+core event store's memory usage. Compaction can still omit old reference-bearing
+groups; there is no automatic archive search/index or garbage collection.
+
 ### Advisory memory
 
 `agent-harness-memory` provides `InMemoryStore` and append-only `JsonlMemoryStore`. The default recall algorithm ranks records by case-insensitive lexical overlap, an exact-phrase bonus, recency, and stable ID ordering.
@@ -557,7 +586,7 @@ The core integration tests cover capability restriction, exact-action approval, 
 
 - Normal turn completion is not independent task acceptance. The optional task layer checks exact artifact contents supplied by a trusted host; it is not a general code evaluator or automatic scheduler. The paired offline evaluation runner measures this narrow baseline.
 - The included provider supports non-streaming Chat Completions only. Its curl transport is blocking, and the core does not automatically retry `ModelError` values marked retryable.
-- Deterministic compaction drops complete old message groups and records the count; it does not generate a semantic summary. The character cap is an approximate byte-size check. Optional final provider-request budgeting requires a trusted model-specific token counter; long outputs are not yet externalized.
+- Deterministic compaction drops complete old message groups and records the count; it does not generate a semantic summary. The character cap is an approximate byte-size check. Optional final provider-request budgeting requires a trusted model-specific token counter; optional output externalization retains original durable receipts and requires explicitly authorized retrieval.
 - JSONL stores provide synchronized append and `sync_data` durability within one process, not cross-process distributed locking.
 - Only the core event store repairs incomplete final JSONL records; the memory and task-ledger stores still reject malformed tails.
 - Bubblewrap is the only included operating-system sandbox and is Linux-specific. Container, VM, SSH, and cloud-sandbox executors remain extension points.

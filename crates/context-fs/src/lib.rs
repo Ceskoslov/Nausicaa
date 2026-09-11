@@ -1,5 +1,8 @@
 //! Optional filesystem-backed context extension.
 
+mod output;
+pub use output::{ExternalOutputCompiler, OutputArchive, ReadOutputTool};
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
