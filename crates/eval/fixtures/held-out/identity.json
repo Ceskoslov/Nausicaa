@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "split": "held-out",
+  "objective": "Implement identity.",
+  "initial": "",
+  "expected": "pub fn identity(x: i32) -> i32 { x }\n",
+  "max_attempts": 2,
+  "deny_write": false,
+  "interrupt_execution": false,
+  "id": "identity",
+  "proposals": [
+    "pub fn identity(x: i32) -> i32 { x }\n"
+  ]
+}

@@ -3,6 +3,7 @@ members = [
     "crates/app-server",
     "crates/context-fs",
     "crates/executor-process",
+    "crates/eval",
     "crates/harness",
     "crates/harness-core",
     "crates/memory",

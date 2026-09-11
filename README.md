@@ -86,6 +86,7 @@ The main extension seams are:
 | `agent-harness-memory` | `memory` / `memory` | In-memory or JSONL advisory memory, lexical recall, and a frozen recall snapshot for each turn. |
 | `agent-harness-executor-process` | `process-executor` / `process_executor` | Workspace-scoped file tools plus explicit local and Linux Bubblewrap process runners. |
 | `agent-harness-provider-openai` | `provider-openai` / `provider_openai` | Non-streaming OpenAI-compatible Chat Completions mapping with a replaceable HTTP transport. |
+| `agent-harness-eval` | Standalone CLI; optional `live` feature | Paired offline core/task fixtures, retained evidence and metrics; opt-in pinned provider runs. |
 | `agent-harness-task` | `task` / `task` | Immutable criteria, exact-content acceptance, attempt budgets, retained artifacts, and a versioned task journal. |
 | `agent-harness-task-ledger` | `task-ledger` / `task_ledger` | Idempotent background-task submission, worker leases, heartbeat, cancellation, recovery, and delivery acknowledgement. |
 | `agent-harness-app-server` | `app-server` / `app_server` | Line-oriented JSON-RPC 2.0 thread and turn control plane. |
@@ -453,6 +454,16 @@ attempt must be reconciled by the host or explicitly blocked, never blindly retr
 The host owns exclusive journal access and snapshot retention. This separate
 format changes no existing core or task-ledger records.
 
+Run the paired offline baseline with a new output directory:
+
+```sh
+cargo run -p agent-harness-eval --offline -- --output /tmp/nausicaa-eval-v1
+```
+
+See [the evaluation guide](crates/eval/README.md) for metric definitions, retained
+evidence, development/held-out fixtures, and explicit opt-in live configuration.
+The scripted suite measures acceptance behavior, not live model quality.
+
 ## Background task ledger
 
 `JsonlTaskLedger` is a separate durable primitive for work that outlives an interactive turn. It supports:
@@ -518,7 +529,7 @@ The core integration tests cover capability restriction, exact-action approval, 
 
 ## Current limitations
 
-- Normal turn completion is not independent task acceptance. The optional task layer checks exact artifact contents supplied by a trusted host; it is not a general code evaluator or automatic scheduler. The evaluation runner remains the next roadmap slice.
+- Normal turn completion is not independent task acceptance. The optional task layer checks exact artifact contents supplied by a trusted host; it is not a general code evaluator or automatic scheduler. The paired offline evaluation runner measures this narrow baseline.
 - The included provider supports non-streaming Chat Completions only. Its curl transport is blocking, and the core does not automatically retry `ModelError` values marked retryable.
 - Deterministic compaction drops complete old message groups and records the count; it does not generate a semantic summary. The character cap is an approximate byte-size check, not a token budget for the full provider request.
 - JSONL stores provide synchronized append and `sync_data` durability within one process, not cross-process distributed locking.
@@ -541,6 +552,7 @@ crates/
 ├── memory/             # Optional advisory long-term memory
 ├── executor-process/   # Optional file tools and process backends
 ├── provider-openai/    # Optional OpenAI-compatible adapter
+├── eval/               # Paired task acceptance evaluation CLI
 ├── task/               # Optional deterministic task acceptance
 ├── task-ledger/        # Optional durable background-task state machine
 ├── app-server/         # Optional JSON-RPC control plane

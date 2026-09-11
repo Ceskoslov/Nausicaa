@@ -30,7 +30,7 @@ resumption, no immediate cancellation of blocking calls, no tail repair in memor
 or task-ledger stores, and no guaranteed cleanup of local processes that escape
 their process group. See [ARCHITECTURE.md](ARCHITECTURE.md).
 
-## 2. Task acceptance and an evaluation baseline — in progress
+## 2. Task acceptance and an evaluation baseline — narrow baseline completed
 
 **Objective:** distinguish "the model ended a turn" from "the requested work has
 verifiable completion evidence."
@@ -41,7 +41,10 @@ snapshots, and a versioned `TaskJournal`. Required exact-content checks fail
 closed; unknown receipts block progress; replay never retries a running attempt.
 The normal embeddable core turn API is unchanged. Six deterministic regression
 tests cover repair, budget exhaustion, receipt retention, interrupted attempts,
-invalid replay, and append failure. The evaluation runner is the next slice.
+invalid replay, and append failure. `agent-harness-eval` now runs five fixtures
+in isolated directories in both modes, retaining source, events, evidence, and
+metrics. Its separate held-out fixtures cover identity and unknown execution.
+Explicit opt-in live configuration is available but was not run for this baseline.
 
 - Store the objective, explicit acceptance criteria, artifact references,
   verification evidence, and remaining work independently of chat history.
@@ -64,6 +67,19 @@ captures UTF-8 artifacts under logical IDs; complete snapshots are retained inli
 The gate recomputes exact-content evidence on replay. Repair feedback is advisory
 context supplied by the host. See [ARCHITECTURE.md](ARCHITECTURE.md#task-acceptance).
 The evaluation runner must measure this narrow baseline before broadening it.
+
+**Measured acceptance (2026-09-11):** the coding fixture first fails exact-source
+verification, receives repair feedback, and passes on its second attempt. Repeated
+failure exhausts two attempts. Denied receipts remain denied; interruption yields
+one unknown receipt and blocks further attempts. The paired suite reports 3/5
+false completions under the naive core-turn interpretation and 0/5 with the task
+layer; independently verified success is 1/5 versus 2/5. See the
+[evaluation guide](crates/eval/README.md) for definitions and reproduction.
+
+This completes the deterministic baseline, not general coding evaluation:
+artifacts are UTF-8 snapshots, the oracle is exact content, budgets count attempts,
+and live model quality has not been measured. General semantic checkers, stronger
+artifact retention, and real model comparisons need their own measured changes.
 
 ## 3. Sustained execution — proposed after the task baseline
 

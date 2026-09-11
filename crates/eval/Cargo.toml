@@ -1,0 +1,19 @@
+[package]
+name = "agent-harness-eval"
+version = "0.1.0"
+description = "Offline paired core and task acceptance evaluation"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+live = ["dep:agent-harness-provider-openai"]
+
+[dependencies]
+agent-harness-core.workspace = true
+agent-harness-task.workspace = true
+agent-harness-executor-process.workspace = true
+agent-harness-provider-openai = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "split": "held-out",
+  "objective": "Fix add so it adds the two arguments.",
+  "initial": "pub fn add(a: i32, b: i32) -> i32 { a - b }\n",
+  "expected": "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+  "max_attempts": 2,
+  "deny_write": false,
+  "interrupt_execution": true,
+  "id": "unknown",
+  "proposals": [
+    "pub fn add(a: i32, b: i32) -> i32 { a + b }\n"
+  ]
+}

@@ -31,6 +31,7 @@ flowchart TD
 | `memory` | Advisory records, lexical recall, bounded per-turn recall cache | Authorization or a durable task plan |
 | `executor-process` | File tools, shell preparation, local and Bubblewrap process runners | Distributed execution or universal process containment |
 | `provider-openai` | Chat Completions mapping and replaceable HTTP transport | Streaming, runtime retry policy, task completion |
+| `eval` | Paired isolated task fixtures, evidence and metrics; opt-in live runs | General semantic code verification or production scheduling |
 | `task` | Immutable task criteria, deterministic acceptance, attempt budgets, retained evidence and task journal | Tool authority, worker scheduling, automatic resumption |
 | `task-ledger` | Idempotent submission, claims, leases, terminal results, delivery acknowledgement | A running worker service or automatic task retries |
 | `app-server` | Line-oriented JSON-RPC control and in-process background-turn tracking | Durable scheduler state |
@@ -222,3 +223,28 @@ that instance. Malformed or unterminated journals fail closed without tail repai
 No cross-instance locking, transactional link to the core log, automatic scheduler,
 size limit, wall-clock limit or token budget is supplied here. Hosts own retention,
 exclusive file ownership, execution limits and sensitive artifact handling.
+
+
+## Evaluation boundary
+
+The standalone [evaluation crate](crates/eval/README.md) runs identical versioned
+fixtures against core-only and task-layer embeddings. It registers the existing
+file writer and keeps policy and execution paths intact. Core-only stops at one
+normal turn; task mode feeds durable repair feedback into another bounded turn.
+Independent exact-content checks inspect retained snapshots in both modes.
+
+Each run uses a new directory and retains the fixture, source, core events,
+per-attempt evidence, task events where applicable, and a JSON metrics report.
+The held-out regression files are separate from development fixtures. The
+interruption fixture drops a pending executor future, recovers the core, and
+records the unknown receipt without retry; denied fixtures fabricate calls to a
+policy-hidden writer to exercise rejection. This is deterministic fault injection,
+not a measurement of real model behavior or filesystem containment.
+
+The optional `live` CLI feature requires explicit pinned model/deployment metadata
+and records provider settings separately from credentials. Pin validity belongs
+to the host. Live runs skip the scripted interruption fixture and report the skip;
+default tests never use network or credentials. Schema-version-1 reports are new
+artifacts and change no existing durable formats. Package version plus retained
+fixture/configuration bytes identify the baseline; hosts should also retain their
+checkout revision when comparing locally modified builds.
