@@ -9,8 +9,11 @@ cargo run -p agent-harness-eval --offline -- --output /tmp/nausicaa-eval-v1
 The output directory must not exist. Each fixture/mode gets a fresh workspace,
 core `events.jsonl`, per-attempt `evidence-N.json`, the exact fixture specification,
 and `report.json`. Task mode also retains `task.jsonl`. `summary.json` collects all
-reports. Outputs are host files, not an OS sandbox; keep generated evidence outside
-the repository. Tests use unique temporary directories and remove them on exit.
+reports. Outputs are host files, not an OS sandbox; keep generated evidence out of
+version control. Use an external persistent directory or the Git-ignored
+`.agent-harness/evals/` directory for live runs that must survive a temporary-directory
+reset. Create the parent directory first; every run still needs a new output
+directory. Tests use unique temporary directories and remove them on exit.
 
 ## Paired protocol
 
@@ -96,10 +99,18 @@ completion-token cap, and a configurable transport timeout. `timeout_seconds`
 accepts 1–300 seconds and defaults to the original 30 seconds when omitted. Both
 the retained configuration and summary record the effective timeout. Increase it
 explicitly for endpoints whose response latency exceeds the default; transport
-timeouts are infrastructure failures, not evidence of model task quality. It skips the synthetic
-interruption fixture and records that omission. Other fixtures run against fresh
+timeouts are infrastructure failures, not evidence of model task quality. It skips
+the synthetic interruption fixture and records that omission. Other fixtures run against fresh
 adapter instances for each mode. Live calls are sequential, not automatically
 retried, and not part of the default tests. No live run was used for the baseline.
 Some providers may reject these settings; failures remain visible in turn errors.
 This remains an exact-content microbenchmark and does not justify orchestration
 or broad model-quality claims.
+
+
+## Live validation record
+
+The [2026-09-11 Nemotron free-route report](reports/2026-09-11-nemotron-free.md)
+records a completed eight-run live validation, including exact-content failures,
+supplementary behavioral diagnostics, usage, authority checks and reproducibility
+limits. Its live measurements are separate from the scripted baseline above.

@@ -78,7 +78,13 @@ layer; independently verified success is 1/5 versus 2/5. See the
 
 This completes the deterministic baseline, not general coding evaluation:
 artifacts are UTF-8 snapshots, the oracle is exact content, budgets count attempts,
-and live model quality has not been measured. General semantic checkers, stronger
+and general live model quality has not been established. A completed
+[Nemotron free-route validation](crates/eval/reports/2026-09-11-nemotron-free.md)
+now covers eight live runs: all responses arrived, no exact-content task passed,
+and six generated artifacts passed supplementary compilation/behavior checks.
+Whitespace-only differences, bounded repair failures, and mutable provider routing
+limit the conclusions; this is provider/harness validation, not broad coding
+quality evidence. General semantic checkers, stronger
 artifact retention, and real model comparisons need their own measured changes.
 
 ## 3. Sustained execution — context baseline implemented
