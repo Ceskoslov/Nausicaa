@@ -320,3 +320,16 @@ for independent task evidence; task journal snapshots are not replaced by these
 context references. Old compacted references are not automatically indexed, and
 retention/garbage collection remains a host responsibility. This new archive and
 reference format does not migrate or rewrite any existing journal.
+
+
+## TUI request configuration
+
+The executable validates request options before opening the terminal. CLI values
+precede environment variables. Timeout defaults to 120 seconds (1–600), completion
+output to 4096 tokens (1–131072), per-turn requests to 32 (1–128), and retained
+transcript groups to 200 (1–2000). Temperature is optional (finite, 0–2). Invalid,
+duplicate and unknown options are rejected. These settings configure existing
+provider/runtime/context boundaries; they do not grant tools or change journals.
+The new default output cap is an intentional TUI behavior change; the provider
+library constructor remains unchanged. Streaming and transport cancellation are
+still separate implementation work at this configuration step.

@@ -221,12 +221,28 @@ cargo run -p agent-harness-tui -- --workspace .
 --workspace <path>    Set the workspace and event-store location
 --endpoint <url>      Set the OpenAI-compatible Chat Completions URL
 --model <name>        Set the provider model name
+--request-timeout <s> Model request deadline (1–600 seconds; default 120)
+--max-output-tokens <n> Completion cap (1–131072; default 4096)
+--temperature <n>     Sampling temperature (0–2; omitted by default)
+--max-model-iterations <n> Requests per turn (1–128; default 32)
+--history-groups <n>  Complete transcript groups retained (1–2000; default 200)
 --no-tools            Do not register the workspace tools
 --unsafe-local-exec   Run shell commands directly on the host
 -h, --help            Show command help
 ```
 
-Command-line values take precedence over `HARNESS_API_URL` and `HARNESS_MODEL`. API keys are read from `HARNESS_API_KEY` and then `OPENAI_API_KEY`.
+Command-line values take precedence over environment settings. Request options also
+accept `HARNESS_REQUEST_TIMEOUT`, `HARNESS_MAX_OUTPUT_TOKENS`,
+`HARNESS_TEMPERATURE`, `HARNESS_MAX_MODEL_ITERATIONS`, and
+`HARNESS_HISTORY_GROUPS`; endpoint/model use `HARNESS_API_URL`/`HARNESS_MODEL`.
+API keys are read from `HARNESS_API_KEY` and then `OPENAI_API_KEY`. Invalid,
+missing, duplicate, and unknown options fail before opening the terminal or network.
+
+The TUI now sends a default `max_completion_tokens` cap of 4096; previous versions
+left output uncapped by the client. Providers must support that field and the
+selected value. Temperature is omitted unless supplied. Timeout is a whole-model-
+request deadline, not a shell timeout or a whole-turn budget. Increasing it does
+not reduce endpoint latency. Transcript groups are not a token budget.
 
 Inside the TUI:
 

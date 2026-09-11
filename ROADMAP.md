@@ -121,6 +121,11 @@ embedding boundary; production model tokenizers, token-driven automatic
 compaction, archive indexing/GC, and cumulative task budgets remain extensions.
 The next ordered implementation area is Editing tools.
 
+**TUI request configuration:** validated CLI/environment settings now expose the
+model request timeout, completion-token cap, temperature, per-turn iteration
+limit, and retained transcript groups. This is the first provider/TUI slice;
+phase timings, streaming display and in-flight request cancellation are next.
+
 Reserve verification time in a task budget rather than spending the entire budget
 on generation. Automatic compaction or resumption must preserve user constraints
 and the provenance of verification evidence.

@@ -1,3 +1,5 @@
+mod options;
+
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -12,7 +14,7 @@ use agent_harness_core::{
 use agent_harness_executor_process::{
     BubblewrapRunner, LocalProcessRunner, ProcessRunner, register_workspace_tools,
 };
-use agent_harness_provider_openai::{CurlTransport, OpenAiCompatibleAdapter, OpenAiConfig};
+use agent_harness_provider_openai::{CurlTransport, OpenAiCompatibleAdapter};
 use agent_harness_tui::{TuiConfig, approval_channel, event_channel};
 
 struct DemoModel;
@@ -48,29 +50,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         print_help();
         return Ok(());
     }
-    let demo = arguments.iter().any(|argument| argument == "--demo");
-    let no_tools = arguments.iter().any(|argument| argument == "--no-tools");
-    let unsafe_local = arguments
-        .iter()
-        .any(|argument| argument == "--unsafe-local-exec");
-    let workspace = argument_value(&arguments, "--workspace")
+    let options = options::Options::parse(&arguments, |name| env::var(name).ok())?;
+    let workspace = options
+        .workspace
+        .as_ref()
         .map(PathBuf::from)
         .unwrap_or(env::current_dir()?)
         .canonicalize()?;
-
-    let model: Arc<dyn ModelAdapter> = if demo {
+    let model: Arc<dyn ModelAdapter> = if options.demo {
         Arc::new(DemoModel)
     } else {
-        let endpoint = argument_value(&arguments, "--endpoint")
-            .or_else(|| env::var("HARNESS_API_URL").ok())
-            .unwrap_or_else(|| "https://api.openai.com/v1/chat/completions".to_owned());
-        let model = argument_value(&arguments, "--model")
-            .or_else(|| env::var("HARNESS_MODEL").ok())
-            .ok_or("set --model, HARNESS_MODEL, or use --demo")?;
-        let mut config = OpenAiConfig::new(endpoint, model);
-        config.api_key = env::var("HARNESS_API_KEY")
-            .or_else(|_| env::var("OPENAI_API_KEY"))
-            .ok();
+        let config = options.provider_config(
+            env::var("HARNESS_API_KEY")
+                .or_else(|_| env::var("OPENAI_API_KEY"))
+                .ok(),
+        );
         Arc::new(OpenAiCompatibleAdapter::new(
             config,
             Arc::new(CurlTransport::new()),
@@ -78,8 +72,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut tools = ToolRegistry::new();
-    if !no_tools {
-        let runner: Arc<dyn ProcessRunner> = if unsafe_local {
+    if !options.no_tools {
+        let runner: Arc<dyn ProcessRunner> = if options.unsafe_local {
             Arc::new(LocalProcessRunner::new(1_048_576))
         } else {
             Arc::new(BubblewrapRunner::new(&workspace, 1_048_576)?)
@@ -101,7 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             context_config.skill_roots.push(skill_root);
         }
     }
-    context_config.max_transcript_groups = Some(200);
+    context_config.max_transcript_groups = Some(options.history_groups);
 
     let state_directory = workspace.join(".agent-harness");
     fs::create_dir_all(&state_directory)?;
@@ -124,6 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_observer(observer)
         .with_config(RuntimeConfig {
             workspace: Some(workspace.clone()),
+            max_model_iterations: options.max_model_iterations,
             ..RuntimeConfig::default()
         }),
     );
@@ -141,13 +136,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn argument_value(arguments: &[String], name: &str) -> Option<String> {
-    arguments
-        .windows(2)
-        .find(|window| window[0] == name)
-        .map(|window| window[1].clone())
-}
-
 fn print_help() {
     println!(
         "agent-harness-tui\n\n\
@@ -156,9 +144,16 @@ fn print_help() {
            --workspace <path>    Workspace and event-store location\n\
            --endpoint <url>      OpenAI-compatible chat completions URL\n\
            --model <name>        Provider model name\n\
+           --request-timeout <s> Total model request timeout (1–600; default 120)\n\
+           --max-output-tokens <n> Completion cap (1–131072; default 4096)\n\
+           --temperature <n>     Sampling temperature (0–2; provider default if absent)\n\
+           --max-model-iterations <n> Per-turn request limit (1–128; default 32)\n\
+           --history-groups <n>  Retained complete transcript groups (1–2000; default 200)\n\
            --no-tools            Disable workspace tools\n\
            --unsafe-local-exec   Run shell on the host instead of Bubblewrap\n\
            -h, --help            Show this help\n\n\
-         Environment: HARNESS_API_URL, HARNESS_MODEL, HARNESS_API_KEY, OPENAI_API_KEY"
+         Environment: HARNESS_API_URL, HARNESS_MODEL, HARNESS_API_KEY, OPENAI_API_KEY,\n\
+         HARNESS_REQUEST_TIMEOUT, HARNESS_MAX_OUTPUT_TOKENS, HARNESS_TEMPERATURE,\n\
+         HARNESS_MAX_MODEL_ITERATIONS, HARNESS_HISTORY_GROUPS"
     );
 }
