@@ -454,6 +454,12 @@ attempt must be reconciled by the host or explicitly blocked, never blindly retr
 The host owns exclusive journal access and snapshot retention. This separate
 format changes no existing core or task-ledger records.
 
+Wrap a compacting compiler with `TaskContextCompiler::new(inner, &spec)` to pin
+the immutable objective and required criteria in every request. Use it as the
+outermost compiler, scoped to one task. Its segment is advisory context and does
+not grant tools. It adds content after the inner compiler's character check;
+combine it with final provider-request accounting when enforcing a token window.
+
 Run the paired offline baseline with a new output directory:
 
 ```sh
@@ -510,6 +516,26 @@ The ledger is a storage/state-machine component. It does not include a resident 
 
 `OpenAiConfig` supports endpoint, model, optional bearer key, optional organization, timeout, and additional request-body fields. The included `CurlTransport` accepts only HTTP(S) URLs and sends its generated curl configuration—including headers and request body—through stdin instead of exposing the bearer token in process arguments. `HttpTransport` can be replaced for another HTTP stack or for deterministic tests.
 
+For a model-specific final request budget, install a trusted `RequestTokenCounter`
+with `OpenAiCompatibleAdapter::with_request_budget(RequestBudget {
+context_window_tokens, reserved_output_tokens }, counter)`. The counter receives
+the exact final JSON body, including mapped messages, tool schemas, extension
+fields and output cap. The adapter checks input usage against the window minus
+the reserved output allowance before calling the transport. There is no built-in
+universal tokenizer; the counter must reject unsupported models or fields.
+
+With this option enabled, a missing output cap becomes `max_completion_tokens`
+equal to the reservation. An existing positive `max_tokens` or
+`max_completion_tokens` may be smaller, but conflicting, invalid or oversized caps
+fail without transport or retry. Accounting errors and over-budget requests also
+fail without transport. This is a per-request window guard, not a cumulative task
+cost budget or automatic compaction. Existing callers remain unbudgeted by default.
+
+`extra_body` cannot provide `tools`, legacy `functions` or `function_call` schemas;
+register tools and grant access through the runtime instead. When no projected
+tools remain, `tool_choice` is removed too. This closes a model-visibility gap for
+empty projections; execution policy checks remain in force.
+
 The adapter currently returns one completed response and performs blocking transport work inside its future. Streaming and automatic retry orchestration are not implemented.
 
 ## Development and verification
@@ -531,7 +557,7 @@ The core integration tests cover capability restriction, exact-action approval, 
 
 - Normal turn completion is not independent task acceptance. The optional task layer checks exact artifact contents supplied by a trusted host; it is not a general code evaluator or automatic scheduler. The paired offline evaluation runner measures this narrow baseline.
 - The included provider supports non-streaming Chat Completions only. Its curl transport is blocking, and the core does not automatically retry `ModelError` values marked retryable.
-- Deterministic compaction drops complete old message groups and records the count; it does not generate a semantic summary. The character cap is an approximate byte-size check, not a token budget for the full provider request.
+- Deterministic compaction drops complete old message groups and records the count; it does not generate a semantic summary. The character cap is an approximate byte-size check. Optional final provider-request budgeting requires a trusted model-specific token counter; long outputs are not yet externalized.
 - JSONL stores provide synchronized append and `sync_data` durability within one process, not cross-process distributed locking.
 - Only the core event store repairs incomplete final JSONL records; the memory and task-ledger stores still reject malformed tails.
 - Bubblewrap is the only included operating-system sandbox and is Linux-specific. Container, VM, SSH, and cloud-sandbox executors remain extension points.

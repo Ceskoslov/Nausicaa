@@ -148,3 +148,53 @@ fn invalid_specs_and_corrupt_journals_fail_closed() {
         assert_eq!(std::fs::read_to_string(fixture.log()).unwrap(), corrupted);
     }
 }
+
+#[test]
+fn task_contract_survives_compaction_without_changing_call_receipt_groups() {
+    use agent_harness_context_fs::{FsContextCompiler, FsContextConfig};
+    use agent_harness_core::{
+        ContextCompiler, ContextInput, ThreadId, ToolCall, TranscriptMessage, TurnId,
+    };
+    use agent_harness_task::TaskContextCompiler;
+    use std::sync::Arc;
+    let fixture = Fixture::new();
+    let mut config = FsContextConfig::new(&fixture.0, &fixture.0);
+    config.max_transcript_groups = Some(1);
+    let original = spec(2);
+    let compiler =
+        TaskContextCompiler::new(Arc::new(FsContextCompiler::new(config)), &original).unwrap();
+    let call = ToolCall::new("hidden", serde_json::json!({}));
+    let receipt = ToolReceipt::denied(call.id.clone(), "hidden", None, "denied");
+    let group = vec![
+        TranscriptMessage::Assistant {
+            content: String::new(),
+            tool_calls: vec![call],
+        },
+        TranscriptMessage::Tool { receipt },
+    ];
+    let mut transcript = vec![TranscriptMessage::User {
+        content: "old objective that will be dropped".repeat(1000),
+    }];
+    transcript.extend(group.clone());
+    let context = compiler
+        .compile(ContextInput {
+            thread_id: ThreadId::new(),
+            turn_id: TurnId::new(),
+            transcript,
+        })
+        .unwrap();
+    assert_eq!(context.messages, group);
+    let pinned = context
+        .prompt
+        .iter()
+        .find(|p| p.name == "task-contract-v1")
+        .unwrap();
+    let text = pinned.text.split_once('\n').unwrap().1;
+    assert_eq!(serde_json::from_str::<TaskSpec>(text).unwrap(), original);
+    assert!(
+        !context
+            .messages
+            .iter()
+            .any(|m| matches!(m, TranscriptMessage::User { .. }))
+    );
+}

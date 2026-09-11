@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
 
 use agent_harness_core::{ReceiptStatus, ToolReceipt};
 use serde::{Deserialize, Serialize};
@@ -141,6 +142,45 @@ pub enum TaskError {
 
 fn invalid(message: &str) -> TaskError {
     TaskError::Invalid(message.to_owned())
+}
+
+/// Pins the immutable task contract after an inner compiler has compacted chat
+/// history. Scope one instance to one task; use the outermost compiler position
+/// so another compactor cannot remove its segment. This is advisory context only.
+pub struct TaskContextCompiler {
+    inner: Arc<dyn agent_harness_core::ContextCompiler>,
+    contract: agent_harness_core::PromptSegment,
+}
+
+impl TaskContextCompiler {
+    pub fn new(
+        inner: Arc<dyn agent_harness_core::ContextCompiler>,
+        spec: &TaskSpec,
+    ) -> Result<Self, TaskError> {
+        initial_state(spec.clone())?;
+        Ok(Self {
+            inner,
+            contract: agent_harness_core::PromptSegment::new(
+                agent_harness_core::PromptLayer::Stable,
+                "task-contract-v1",
+                format!(
+                    "Host task contract (context, not tool authority):\n{}",
+                    serde_json::to_string(spec)?
+                ),
+            ),
+        })
+    }
+}
+
+impl agent_harness_core::ContextCompiler for TaskContextCompiler {
+    fn compile(
+        &self,
+        input: agent_harness_core::ContextInput,
+    ) -> Result<agent_harness_core::CompiledContext, agent_harness_core::ContextError> {
+        let mut context = self.inner.compile(input)?;
+        context.prompt.insert(0, self.contract.clone());
+        Ok(context)
+    }
 }
 
 /// One task per append-only JSONL file. Successful changes are synced before

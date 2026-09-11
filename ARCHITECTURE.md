@@ -170,8 +170,8 @@ No code path grants policy authority to recalled text.
 
 `ModelAdapter` returns a complete response. The included adapter uses non-streaming
 Chat Completions through a blocking curl transport. Model errors carry a retryable
-flag, but the runtime does not implement automatic retries. There is no token/cost
-budget beyond recorded input/output usage and the iteration limit.
+flag, but the runtime does not implement automatic retries. An optional provider request budget now accounts for the final body using a
+host-supplied model-specific counter; no cumulative task token/cost budget exists.
 
 The app server stores turn-control/status entries in memory; durable events do not
 automatically reconstruct that table. The TUI starts a new thread on startup and
@@ -248,3 +248,37 @@ default tests never use network or credentials. Schema-version-1 reports are new
 artifacts and change no existing durable formats. Package version plus retained
 fixture/configuration bytes identify the baseline; hosts should also retain their
 checkout revision when comparing locally modified builds.
+
+
+## Final request accounting and pinned task context
+
+`TaskContextCompiler` wraps an existing compiler and prepends a serialized immutable
+`TaskSpec` after inner compilation. It is scoped to one task and must be outermost
+when preserving the contract. It does not change transcript calls or receipts,
+acceptance criteria, policy, or approvals. The inner character limit does not
+include this later segment, so it is not a final request limit.
+
+The optional provider `RequestBudget` is enforced after complete Chat Completions
+mapping, extension fields, and output-cap insertion, before HTTP transport. Its
+trusted `RequestTokenCounter` receives that exact body and must account for the
+selected model's framing, tools, messages and supported extensions. Unknown model
+accounting must return an error; no universal byte/token ratio is assumed. A test
+counter uses serialized bytes only as a deterministic oracle, not a real tokenizer.
+Input must fit `context_window_tokens - reserved_output_tokens`; subtraction is
+validated on installation and never uses overflow-prone input-plus-output addition.
+
+Absent output caps become `max_completion_tokens` equal to the reservation. A
+single existing positive modern or legacy cap can be smaller; invalid, conflicting
+or larger caps fail closed. All counting/configuration/over-budget errors are
+non-retryable and never cross transport. No trimming occurs at this boundary, so
+call/receipt groups and task constraints cannot be silently truncated to fit.
+
+This adds opt-in builders and types without changing core events, serialized task
+records, or existing constructors/configuration fields. Existing adapters remain
+unbudgeted. One intentional mapping correction applies to all adapters:
+`extra_body.tools`, `functions`, and `function_call` are removed before sending;
+only policy-projected registered schemas can be exposed. `tool_choice` is also
+removed when the projection is empty. Hosts that injected schemas through extra
+fields must register/grant them through the core instead. Model tokenization is
+host-supplied; automatic compaction, output externalization, and aggregate spending
+limits remain separate work.

@@ -81,7 +81,7 @@ artifacts are UTF-8 snapshots, the oracle is exact content, budgets count attemp
 and live model quality has not been measured. General semantic checkers, stronger
 artifact retention, and real model comparisons need their own measured changes.
 
-## 3. Sustained execution — proposed after the task baseline
+## 3. Sustained execution — context slice in progress
 
 Deliver these as separate reviewable changes, not one large runtime replacement.
 
@@ -93,6 +93,20 @@ Deliver these as separate reviewable changes, not one large runtime replacement.
 | Persistence | Define checkpoints, durable waiting states, and ownership for resumption | Restart at model/approval/execution/receipt boundaries; resume known-safe work and surface unknown side effects without replay |
 | Execution | Separate execution identity/status from the model worker and supervise long-lived work | Restart the worker and reconcile a running/completed execution using its ID; cleanup and resource limits remain observable |
 | Control plane | Reconstruct status, expose resume, retain delivery state | A client can reconnect after restart and observe the correct task/turn state and pending actions |
+
+**Implemented context slice:** `TaskContextCompiler` pins the immutable objective
+and required criteria after transcript compaction without altering call/receipt
+groups. The optional provider `RequestBudget` checks the exact final request using
+a trusted model-specific `RequestTokenCounter`, reserving bounded output capacity
+and rejecting over-budget or uncountable requests before transport. Tool schema
+size and extension fields are covered. Provider extensions can no longer restore
+hidden tools when the core projection is empty.
+
+Focused regression coverage includes compacted-away initial instructions, preserved
+denied call/receipt groups, oversized schemas, exact budget boundaries, invalid
+output caps, counting errors, and extra-body schema injection. This is not the
+whole Context row: externalized outputs and on-demand retrieval remain pending,
+as do a production tokenizer and cumulative task time/token budgets.
 
 Reserve verification time in a task budget rather than spending the entire budget
 on generation. Automatic compaction or resumption must preserve user constraints

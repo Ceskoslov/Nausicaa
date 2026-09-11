@@ -91,6 +91,7 @@ dependencies = [
 name = "agent-harness-task"
 version = "0.1.0"
 dependencies = [
+ "agent-harness-context-fs",
  "agent-harness-core",
  "serde",
  "serde_json",
