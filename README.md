@@ -214,6 +214,21 @@ cargo run -p agent-harness-tui -- --workspace .
 
 `OPENAI_API_KEY` is used as a fallback when `HARNESS_API_KEY` is absent. The default endpoint is `https://api.openai.com/v1/chat/completions`, so `HARNESS_API_URL` is optional for that endpoint.
 
+For the validated DeepSeek setup, keep the key in the host configuration directory:
+
+```sh
+export HARNESS_API_URL="https://api.deepseek.com/chat/completions"
+export HARNESS_MODEL="deepseek-flash"
+export HARNESS_API_KEY="$(cat "${XDG_CONFIG_HOME:-$HOME/.config}/nausicaa/deepseek.key")"
+cargo run -p agent-harness-tui --offline
+```
+
+The TUI takes the **complete endpoint**, so the base URL `https://api.deepseek.com`
+needs `/chat/completions` appended. See the
+[DeepSeek validation report](crates/provider-openai/reports/2026-09-12-deepseek.md)
+for observed streaming, cancellation and phase timings. Do not put the key in
+repository configuration or command arguments.
+
 ### TUI options and controls
 
 ```text
