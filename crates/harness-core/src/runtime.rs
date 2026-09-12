@@ -608,6 +608,9 @@ impl AgentRuntime {
             .await
         {
             Ok(output) => ToolReceipt::succeeded(prepared, output.value),
+            Err(crate::tool::ToolError::OutcomeUnknown(reason)) => {
+                ToolReceipt::unknown(prepared, reason)
+            }
             Err(error) => ToolReceipt::failed(prepared, error.to_string()),
         };
         self.record_receipt(thread_id, turn_id, receipt.clone(), true)?;

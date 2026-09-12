@@ -127,7 +127,10 @@ limit, and retained transcript groups. The provider and TUI now support bounded 
 version-1 metrics file, and cancellation of in-flight curl requests. Local HTTP
 tests cover previews before completion, cancellation closing the connection and
 missing stream terminators; UI tests cover stale previews and metric privacy.
-Native async HTTP, automatic retry and immediate shell cancellation remain proposed.
+Native async HTTP and automatic retry remain proposed. Built-in shell cancellation
+is now wired through `run_controlled`: bounded polling, Unix group cleanup and
+unknown-effect receipts are tested. Custom runner interruption remains the
+implementer’s responsibility.
 
 Validation on 2026-09-12 also exercised the actual TUI against a local SSE fixture:
 preview display, active Ctrl-C staying in the UI, socket closure, cancellation in
@@ -137,6 +140,14 @@ hit its 60-second deadline at 60,002 ms without visible text. The failure metric
 was recorded; network phases were unavailable. This does not establish live SSE
 compatibility or identify upstream queue versus network delay. Live credentials
 remain unnecessary for deterministic tests.
+
+The subsequent [DeepSeek validation](crates/provider-openai/reports/2026-09-12-deepseek.md)
+completed real short and streaming replies, cancelled an active streamed reply,
+and passed one exact-approved Bubblewrap tool round trip.
+This confirms the tested endpoint's SSE compatibility; it does not explain the
+previous free-route timeout. The actual TUI also cancelled an explicitly approved
+shell on each of the local and Bubblewrap backends in 51 ms, preserving an
+unknown-effect receipt before turn cancellation.
 
 Reserve verification time in a task budget rather than spending the entire budget
 on generation. Automatic compaction or resumption must preserve user constraints

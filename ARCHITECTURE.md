@@ -101,7 +101,8 @@ provide the Unix group-cleanup guarantee.
 The provider future waits for a worker-thread wakeup. Its supervised curl child
 checks cancellation and deadlines while draining bounded output. On Unix cancellation
 kills its process group and arranges reaping; other platforms kill the direct child.
-Legacy adapters/transports and shell runners can still block cancellation.
+Built-in shell runners check cancellation during their synchronous capture loop;
+legacy adapters/transports and custom runners can still block cancellation.
 
 ## Durable state and recovery
 
@@ -376,3 +377,37 @@ waiting; network phase timings come from the provider. Ctrl-C during a turn canc
 and denies approvals; idle Ctrl-C exits. Exit waits at most two seconds while
 rejecting approvals, and state drop also signals cancellation on terminal errors.
 The TUI worker executor parks until woken instead of polling in a busy loop.
+
+
+## Cancellation across the shell execution boundary
+
+`ShellTool` passes the existing execution-context token through the additive
+`ProcessRunner::run_controlled` method. Both built-in backends check it before
+spawn and between bounded pipe-drain batches. Unix cleanup kills the group before
+reaping the leader (preventing PID reuse races) and keeps the existing 250 ms
+cleanup window; exceptional unreaped leaders go to a background reaper. A
+non-Unix cancellation kills only the direct child and schedules reaping. This is
+process cleanup, not an additional containment boundary.
+
+The API is still synchronous. TUI cancellation is signalled from its UI thread;
+embedding hosts need another thread to signal a token while `run_controlled`
+blocks. Dropping a future is not an interrupt mechanism for a currently executing
+synchronous poll. Legacy runner implementations compile unchanged and only check
+cancellation around their blocking call unless they override the new method.
+
+Interrupted shell effects are not assumed absent. `ProcessError::Cancelled`
+becomes the new `ToolError::OutcomeUnknown`; the runtime records an existing
+`Unknown` receipt, then closes remaining accepted calls and records `TurnCancelled`.
+No partial output is returned as success, and there is no automatic retry or
+rollback. This reuses existing durable event/receipt shapes without changing old
+records or replay semantics. Downstream exhaustive matches on `ProcessError` and
+`ToolError` must handle the added variants; `ProcessRequest` and `ProcessOutput`
+are unchanged.
+
+Regression tests cancel both quiet and continuously writing shells before their
+30-second timeout. A runtime fixture verifies child cleanup, preservation of an
+already-created artifact, absence of subsequent effects, unknown/denied receipts
+for accepted calls, and receipt-before-cancellation ordering. An actual TUI test
+with a local model fixture and explicit shell approval observed termination 51 ms
+after Ctrl-C and an `Unknown` receipt on both local and Bubblewrap backends. This measurement is not a latency guarantee
+or proof of sandbox containment.

@@ -12,8 +12,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use agent_harness_core::{
-    BoxFuture, CanonicalAction, EffectKind, PreparedToolCall, RetrySafety, Tool, ToolCall,
-    ToolDefinition, ToolError, ToolExecutionContext, ToolOutput, ToolRegistry,
+    BoxFuture, CancellationToken, CanonicalAction, EffectKind, PreparedToolCall, RetrySafety, Tool,
+    ToolCall, ToolDefinition, ToolError, ToolExecutionContext, ToolOutput, ToolRegistry,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -21,6 +21,8 @@ use thiserror::Error;
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ProcessError {
+    #[error("process cancelled; effects before termination may have occurred")]
+    Cancelled,
     #[error("process I/O error: {0}")]
     Io(String),
     #[error("invalid process request: {0}")]
@@ -46,6 +48,23 @@ pub struct ProcessOutput {
 
 pub trait ProcessRunner: Send + Sync {
     fn run(&self, request: &ProcessRequest) -> Result<ProcessOutput, ProcessError>;
+
+    /// Override to interrupt a running process. Legacy runners only observe
+    /// cancellation around their blocking call.
+    fn run_controlled(
+        &self,
+        request: &ProcessRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<ProcessOutput, ProcessError> {
+        if cancellation.is_cancelled() {
+            return Err(ProcessError::Cancelled);
+        }
+        let output = self.run(request);
+        if cancellation.is_cancelled() {
+            return Err(ProcessError::Cancelled);
+        }
+        output
+    }
 }
 
 /// Unsandboxed runner. It must be selected explicitly.
@@ -65,12 +84,27 @@ impl LocalProcessRunner {
 
 impl ProcessRunner for LocalProcessRunner {
     fn run(&self, request: &ProcessRequest) -> Result<ProcessOutput, ProcessError> {
+        self.run_controlled(request, &CancellationToken::new())
+    }
+    fn run_controlled(
+        &self,
+        request: &ProcessRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<ProcessOutput, ProcessError> {
+        if cancellation.is_cancelled() {
+            return Err(ProcessError::Cancelled);
+        }
         let mut command = Command::new("/bin/sh");
         command
             .arg("-lc")
             .arg(&request.command)
             .current_dir(&request.working_directory);
-        run_command(command, request.timeout_ms, self.maximum_output_bytes)
+        run_command(
+            command,
+            request.timeout_ms,
+            self.maximum_output_bytes,
+            cancellation,
+        )
     }
 }
 
@@ -121,6 +155,16 @@ impl BubblewrapRunner {
 
 impl ProcessRunner for BubblewrapRunner {
     fn run(&self, request: &ProcessRequest) -> Result<ProcessOutput, ProcessError> {
+        self.run_controlled(request, &CancellationToken::new())
+    }
+    fn run_controlled(
+        &self,
+        request: &ProcessRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<ProcessOutput, ProcessError> {
+        if cancellation.is_cancelled() {
+            return Err(ProcessError::Cancelled);
+        }
         let cwd = request.working_directory.canonicalize().map_err(io_error)?;
         if !cwd.starts_with(&self.workspace) {
             return Err(ProcessError::Invalid(format!(
@@ -163,7 +207,12 @@ impl ProcessRunner for BubblewrapRunner {
             .arg("-lc")
             .arg(&request.command)
             .env_clear();
-        run_command(command, request.timeout_ms, self.maximum_output_bytes)
+        run_command(
+            command,
+            request.timeout_ms,
+            self.maximum_output_bytes,
+            cancellation,
+        )
     }
 }
 
@@ -256,8 +305,11 @@ impl Tool for ShellTool {
                 .map_err(|error| ToolError::Execution(error.to_string()))?;
             let output = self
                 .runner
-                .run(&request)
-                .map_err(|error| ToolError::Execution(error.to_string()))?;
+                .run_controlled(&request, &context.cancellation)
+                .map_err(|error| match error {
+                    ProcessError::Cancelled => ToolError::OutcomeUnknown(error.to_string()),
+                    _ => ToolError::Execution(error.to_string()),
+                })?;
             Ok(ToolOutput::new(serde_json::to_value(output).map_err(
                 |error| ToolError::Execution(error.to_string()),
             )?))
@@ -497,7 +549,11 @@ fn run_command(
     mut command: Command,
     timeout_ms: u64,
     maximum_output_bytes: usize,
+    cancellation: &CancellationToken,
 ) -> Result<ProcessOutput, ProcessError> {
+    if cancellation.is_cancelled() {
+        return Err(ProcessError::Cancelled);
+    }
     use std::os::unix::process::CommandExt;
 
     command.process_group(0);
@@ -507,7 +563,7 @@ fn run_command(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(io_error)?;
-    let result = capture_process(&mut child, timeout_ms, maximum_output_bytes);
+    let result = capture_process(&mut child, timeout_ms, maximum_output_bytes, cancellation);
     if result.is_err() {
         let _ = kill_process_group(&child);
         let _ = child.kill();
@@ -517,7 +573,11 @@ fn run_command(
             let _ = child.wait();
         });
     }
-    result
+    if cancellation.is_cancelled() {
+        Err(ProcessError::Cancelled)
+    } else {
+        result
+    }
 }
 
 #[cfg(unix)]
@@ -622,6 +682,7 @@ fn capture_process(
     child: &mut std::process::Child,
     timeout_ms: u64,
     maximum: usize,
+    cancellation: &CancellationToken,
 ) -> Result<ProcessOutput, ProcessError> {
     let mut stdout = CapturedPipe::new(
         child
@@ -642,14 +703,18 @@ fn capture_process(
     let mut exited = false;
     let mut cleanup_started = None;
     let mut timed_out = false;
+    let mut cancelled = false;
     loop {
         stdout.drain()?;
         stderr.drain()?;
         if !exited {
             exited = child_has_exited(child)?;
         }
-        if cleanup_started.is_none() && (exited || start.elapsed() >= timeout) {
-            timed_out = !exited;
+        if cleanup_started.is_none()
+            && (exited || cancellation.is_cancelled() || start.elapsed() >= timeout)
+        {
+            cancelled = cancellation.is_cancelled();
+            timed_out = !exited && !cancelled;
             // This runner owns foreground command groups. Background work must
             // use a separate managed execution rather than orphaning children.
             kill_process_group(child)?;
@@ -668,6 +733,11 @@ fn capture_process(
         }
         thread::sleep(Duration::from_millis(10));
     }
+    // Return cancellation before reaping: run_command's error cleanup retains
+    // the waitable leader until group signalling is complete, avoiding PID reuse.
+    if cancelled {
+        return Err(ProcessError::Cancelled);
+    }
     let status = child.wait().map_err(io_error)?;
     Ok(ProcessOutput {
         exit_code: status.code(),
@@ -684,7 +754,11 @@ fn run_command(
     mut command: Command,
     timeout_ms: u64,
     maximum_output_bytes: usize,
+    cancellation: &CancellationToken,
 ) -> Result<ProcessOutput, ProcessError> {
+    if cancellation.is_cancelled() {
+        return Err(ProcessError::Cancelled);
+    }
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -705,6 +779,13 @@ fn run_command(
     let (status, timed_out) = loop {
         if let Some(status) = child.try_wait().map_err(io_error)? {
             break (status, false);
+        }
+        if cancellation.is_cancelled() {
+            let _ = child.kill();
+            thread::spawn(move || {
+                let _ = child.wait();
+            });
+            return Err(ProcessError::Cancelled);
         }
         if Instant::now() >= deadline {
             child.kill().map_err(io_error)?;
@@ -927,7 +1008,191 @@ mod tests {
     fn shell_output(command: &str, timeout_ms: u64, maximum: usize) -> ProcessOutput {
         let mut shell = Command::new("/bin/sh");
         shell.arg("-c").arg(command);
-        run_command(shell, timeout_ms, maximum).unwrap()
+        run_command(shell, timeout_ms, maximum, &CancellationToken::new()).unwrap()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cancellation_stops_quiet_and_noisy_commands_without_waiting_for_timeout() {
+        for command in [
+            "sleep 5",
+            "while :; do printf noise; printf noise >&2; done",
+        ] {
+            let cancellation = CancellationToken::new();
+            let signal = cancellation.clone();
+            let canceller = thread::spawn(move || {
+                thread::sleep(Duration::from_millis(100));
+                signal.cancel();
+            });
+            let start = Instant::now();
+            let result = LocalProcessRunner::new(32).run_controlled(
+                &ProcessRequest {
+                    command: command.into(),
+                    working_directory: std::env::temp_dir(),
+                    timeout_ms: 30_000,
+                },
+                &cancellation,
+            );
+            canceller.join().unwrap();
+            assert_eq!(result, Err(ProcessError::Cancelled));
+            assert!(start.elapsed() < Duration::from_secs(2));
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    #[ignore = "requires bwrap and permitted user namespaces"]
+    fn bubblewrap_cancellation_stops_a_running_shell() {
+        let directory = std::env::temp_dir().join(ThreadId::new().as_str());
+        fs::create_dir_all(&directory).unwrap();
+        let runner = BubblewrapRunner::new(&directory, 1024).unwrap();
+        let cancellation = CancellationToken::new();
+        let signal = cancellation.clone();
+        let ready = directory.join("ready");
+        let canceller = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !ready.exists() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
+            }
+            let seen = ready.exists();
+            let at = Instant::now();
+            signal.cancel();
+            (seen, at)
+        });
+        let result = runner.run_controlled(
+            &ProcessRequest {
+                command: "touch ready; sleep 5; touch after".into(),
+                working_directory: directory.clone(),
+                timeout_ms: 30_000,
+            },
+            &cancellation,
+        );
+        let (seen, at) = canceller.join().unwrap();
+        assert!(seen, "sandbox did not start: {result:?}");
+        assert_eq!(result, Err(ProcessError::Cancelled));
+        assert!(at.elapsed() < Duration::from_secs(2));
+        assert!(!directory.join("after").exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn runtime_closes_cancelled_shell_with_unknown_receipt_before_turn_cancelled() {
+        use agent_harness_core::{
+            Access, AgentRuntime, CapabilityPolicy, DirectExecutor, LayeredContextCompiler,
+            MemoryEventStore, ModelAdapter, ModelError, ModelRequest, ModelResponse, ReceiptStatus,
+            RuntimeError, RuntimeEvent,
+        };
+        struct ShellModel;
+        impl ModelAdapter for ShellModel {
+            fn complete<'a>(
+                &'a self,
+                _: ModelRequest,
+            ) -> BoxFuture<'a, Result<ModelResponse, ModelError>> {
+                Box::pin(async {
+                    Ok(ModelResponse::tool_calls(vec![
+                        ToolCall::new(
+                            "shell",
+                            json!({"command":"printf before > before; sleep 5 & echo $! > ready; wait; printf after > after", "timeout_ms":30_000}),
+                        ),
+                        ToolCall::new("shell", json!({"command":"touch second"})),
+                    ]))
+                })
+            }
+        }
+        let directory = std::env::temp_dir().join(ThreadId::new().as_str());
+        fs::create_dir_all(&directory).unwrap();
+        let mut tools = ToolRegistry::new();
+        tools
+            .register(ShellTool::new(&directory, Arc::new(LocalProcessRunner::new(1024))).unwrap())
+            .unwrap();
+        let store = Arc::new(MemoryEventStore::new());
+        let runtime = AgentRuntime::new(
+            Arc::new(ShellModel),
+            store.clone(),
+            Arc::new(LayeredContextCompiler::default()),
+            tools,
+            Arc::new(CapabilityPolicy::deny_by_default().grant("shell", Access::Allow)),
+        )
+        .with_executor(Arc::new(DirectExecutor));
+        let thread_id = runtime.start_thread().unwrap();
+        let cancellation = CancellationToken::new();
+        let signal = cancellation.clone();
+        let ready = directory.join("ready");
+        let canceller = thread::spawn(move || {
+            let start = Instant::now();
+            while !ready.exists() && start.elapsed() < Duration::from_secs(3) {
+                thread::sleep(Duration::from_millis(5));
+            }
+            let existed = ready.exists();
+            let at = Instant::now();
+            signal.cancel();
+            (existed, at)
+        });
+        let result = block_on(runtime.run_turn_with_cancellation(&thread_id, "run", cancellation));
+        let (ready, at) = canceller.join().unwrap();
+        assert!(ready);
+        assert!(matches!(result, Err(RuntimeError::Cancelled(_))));
+        assert!(at.elapsed() < Duration::from_secs(2));
+        assert!(directory.join("before").exists());
+        assert!(!directory.join("after").exists());
+        assert!(!directory.join("second").exists());
+        let events = store.all_events().unwrap();
+        let receipts = events
+            .iter()
+            .filter_map(|e| {
+                if let RuntimeEvent::ToolReceiptRecorded { receipt } = &e.event {
+                    Some(receipt)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(receipts[0].status, ReceiptStatus::Unknown);
+        assert_eq!(receipts[1].status, ReceiptStatus::Denied);
+        let start = events
+            .iter()
+            .position(|e| matches!(e.event, RuntimeEvent::ToolExecutionStarted { .. }))
+            .unwrap();
+        let receipt = events
+            .iter()
+            .position(|e| matches!(e.event, RuntimeEvent::ToolReceiptRecorded { .. }))
+            .unwrap();
+        let cancelled = events
+            .iter()
+            .position(|e| matches!(e.event, RuntimeEvent::TurnCancelled))
+            .unwrap();
+        assert!(start < receipt && receipt < cancelled);
+        #[cfg(target_os = "linux")]
+        {
+            let pid = fs::read_to_string(directory.join("ready")).unwrap();
+            if let Ok(stat) = fs::read_to_string(format!("/proc/{}/stat", pid.trim())) {
+                assert!(
+                    matches!(
+                        stat.rsplit_once(") ").unwrap().1.chars().next(),
+                        Some('Z' | 'X')
+                    ),
+                    "descendant still running"
+                );
+            }
+        }
+        // An already-cancelled request must not launch a second process.
+        let stopped = CancellationToken::new();
+        stopped.cancel();
+        assert_eq!(
+            LocalProcessRunner::new(1024).run_controlled(
+                &ProcessRequest {
+                    command: "touch forbidden".into(),
+                    working_directory: directory.clone(),
+                    timeout_ms: 1000
+                },
+                &stopped
+            ),
+            Err(ProcessError::Cancelled)
+        );
+        assert!(!directory.join("forbidden").exists());
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -1009,7 +1274,7 @@ mod tests {
             .unwrap();
         child.stdout = Some(std::process::ChildStdout::from(OwnedFd::from(reader)));
         let start = Instant::now();
-        let output = capture_process(&mut child, 1000, 1024).unwrap();
+        let output = capture_process(&mut child, 1000, 1024, &CancellationToken::new()).unwrap();
         assert!(start.elapsed() < Duration::from_secs(2));
         assert_eq!(output.exit_code, Some(0));
         assert_eq!(output.stdout, "retained");

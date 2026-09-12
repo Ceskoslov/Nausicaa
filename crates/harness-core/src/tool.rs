@@ -56,6 +56,9 @@ impl ToolOutput {
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ToolError {
+    /// Execution crossed the effect boundary but its outcome cannot be proved.
+    #[error("tool outcome is unknown: {0}")]
+    OutcomeUnknown(String),
     #[error("invalid tool arguments: {0}")]
     InvalidArguments(String),
     #[error("tool execution failed: {0}")]

@@ -286,7 +286,8 @@ cleared and never replayed. Tool arguments are not streamed into execution.
 The status line shows elapsed request/turn time and waiting, receiving, approval,
 tool-execution or cancelling state. Cancellation also denies pending approvals.
 Exit requests cancellation and waits up to two seconds for the turn worker.
-Legacy adapters and blocking shell runners may take longer to stop.
+Built-in shell runners observe cancellation during execution. Legacy adapters and
+custom blocking runners may take longer to stop.
 
 Each finished model request shows DNS/TCP/TLS durations, elapsed time to first
 byte and first text, and total request time. `unknown` means no measurement, not
@@ -348,7 +349,7 @@ let outcome = runtime.run_turn(&thread_id, "Do the work").await?;
 println!("{}", outcome.content);
 ```
 
-The core does not select an async runtime. Its public model, approval, executor, and tool boundaries return `BoxFuture`, allowing the embedding application to choose its own executor. The included provider runs supervised curl requests on worker threads and wakes its future; process runners still block internally.
+The core does not select an async runtime. Its public model, approval, executor, and tool boundaries return `BoxFuture`, allowing the embedding application to choose its own executor. The included provider runs supervised curl requests on worker threads and wakes its future; process runners still block internally but check a cancellation token signalled from another thread.
 
 ### Implementing a tool
 
@@ -445,7 +446,31 @@ groups; there is no automatic archive search/index or garbage collection.
 
 The TUI configures a 1 MiB output cap for each process stream.
 
-On Unix, process runners create a separate process group and kill its remaining members on timeout or when the foreground command exits. Output pipes are drained without blocking, with at most a 250 ms cleanup window after termination begins; streams still open at that point are marked truncated. Background processes should use a separately managed execution instead of being orphaned from a foreground shell. A descendant that deliberately creates a new session can escape local process-group cleanup; bounded output draining still returns, but OS sandboxing is required for stronger containment.
+On Unix, process runners create a separate process group and kill its remaining members on cancellation, timeout or when the foreground command exits. Output pipes are drained without blocking, with at most a 250 ms cleanup window after termination begins; streams still open at that point are marked truncated. Background processes should use a separately managed execution instead of being orphaned from a foreground shell. A descendant that deliberately creates a new session can escape local process-group cleanup; bounded output draining still returns, but OS sandboxing is required for stronger containment.
+
+`ProcessRunner::run_controlled` accepts the turn cancellation token. Built-in local
+and Bubblewrap runners check it between bounded pipe-drain batches (10 ms polling),
+then terminate the owned process group on Unix using the existing 250 ms cleanup
+window. Non-Unix cancellation kills only the direct child and schedules reaping.
+These are bounded polling/cleanup intervals, not a hard real-time guarantee.
+The runner remains synchronous; a host must signal cancellation from another
+thread, as the TUI does. Custom runners should override `run_controlled`; the
+legacy default only checks before and after `run`.
+
+A cancelled running shell returns `ProcessError::Cancelled`, mapped by `ShellTool`
+to `ToolError::OutcomeUnknown`. Core persists an `Unknown` receipt before
+`TurnCancelled`, closes unexecuted accepted calls as denied, and never retries the
+interrupted command automatically. Effects already made are not rolled back.
+Captured output is not returned on cancellation; inspect artifacts and reconcile
+unknown effects explicitly. Existing receipt/event formats need no migration;
+exhaustive matches on the two public error enums need their new variants handled.
+
+The opt-in Linux cancellation integration test requires installed `bwrap` and
+permitted user namespaces:
+
+```sh
+cargo test -p agent-harness-executor-process --offline bubblewrap_cancellation -- --ignored
+```
 
 `BubblewrapRunner` is the default TUI backend. It unshares namespaces, does not share the network namespace by default, clears the environment, mounts `/usr`, `/bin`, `/lib`, and `/lib64` read-only when present, provides isolated `/proc`, `/dev`, and `/tmp`, and makes the workspace its only writable host bind. Additional read-only binds and network access must be enabled explicitly in code.
 
@@ -661,7 +686,7 @@ The core integration tests cover capability restriction, exact-action approval, 
 - JSONL stores provide synchronized append and `sync_data` durability within one process, not cross-process distributed locking.
 - Only the core event store repairs incomplete final JSONL records; the memory and task-ledger stores still reject malformed tails.
 - Bubblewrap is the only included operating-system sandbox and is Linux-specific. Container, VM, SSH, and cloud-sandbox executors remain extension points.
-- Cancellation interrupts built-in curl requests. Legacy model adapters, custom blocking transports and process runners may only observe it after their blocking operation returns.
+- Cancellation interrupts built-in curl requests. Built-in shell runners also check cancellation while running. Legacy model adapters, custom blocking transports and custom runners may only observe it after their blocking operation returns.
 - The app server's background-turn status table is process-local even when runtime events use durable storage.
 - The task ledger has recovery semantics but no resident gateway, routing layer, or distributed worker implementation.
 - Parent/child capability intersection is implemented, but a complete subagent/worktree scheduler is not included.
