@@ -98,10 +98,10 @@ mount isolation. Its configured network and bind policy remain separate from
 process cleanup. The non-Unix fallback has bounded reader joining but does not
 provide the Unix group-cleanup guarantee.
 
-The model and process interfaces are asynchronous-looking at the runtime boundary,
-but included provider/process implementations still block internally. Cancellation
-is cooperative and cannot currently interrupt an in-flight blocking model request
-or shell runner immediately.
+The provider future waits for a worker-thread wakeup. Its supervised curl child
+checks cancellation and deadlines while draining bounded output. On Unix cancellation
+kills its process group and arranges reaping; other platforms kill the direct child.
+Legacy adapters/transports and shell runners can still block cancellation.
 
 ## Durable state and recovery
 
@@ -168,8 +168,8 @@ not accounting for the complete provider request or model tokens.
 within a turn. Its bounded snapshot cache is not a persistent task checkpoint.
 No code path grants policy authority to recalled text.
 
-`ModelAdapter` returns a complete response. The included adapter uses non-streaming
-Chat Completions through a blocking curl transport. Model errors carry a retryable
+`ModelAdapter` returns a complete response. The included adapter supports optional
+SSE Chat Completions through supervised curl. Model errors carry a retryable
 flag, but the runtime does not implement automatic retries. An optional provider request budget now accounts for the final body using a
 host-supplied model-specific counter; no cumulative task token/cost budget exists.
 
@@ -333,3 +333,26 @@ provider/runtime/context boundaries; they do not grant tools or change journals.
 The new default output cap is an intentional TUI behavior change; the provider
 library constructor remains unchanged. Streaming and transport cancellation are
 still separate implementation work at this configuration step.
+
+
+## Model progress and request cancellation
+
+`ModelControl`, `ModelProgressObserver` and the default `complete_controlled`
+method are additive APIs. Legacy adapters retain their existing behavior. Progress
+is ephemeral and separate from durable `RuntimeEvent`: it cannot authorize tools,
+prove acceptance, or enter replay. Existing journals need no migration.
+
+Only text deltas are observable before completion. Tool fragments are assembled
+privately (one choice, at most 128 calls), then parsed after successful HTTP/child
+completion and SSE finish reason plus `[DONE]`. Missing terminators and malformed
+streams fail. Core validation and receipt ordering remain unchanged. Curl response
+storage is capped at 8 MiB and SSE lines/events at 1 MiB. Dropping a model future
+cancels its own request without cancelling the parent's shared token. Runtime model
+errors observed with cancellation persist `TurnCancelled`, not `TurnFailed`.
+
+DNS/TCP/TLS are curl phase durations; first-byte and first-text are elapsed from
+request start, not additive phases. Total and first text use a monotonic host clock.
+Diagnostics do not identify provider queue or inference time separately. Observer
+callbacks run on the request worker and should return promptly. A custom transport
+must implement the additive controlled method for interruptible streaming; its
+legacy fallback only checks cancellation before and after the blocking call.

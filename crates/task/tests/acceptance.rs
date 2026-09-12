@@ -303,12 +303,29 @@ fn long_output_and_compacted_history_fit_final_request_with_contract_and_receipt
         context: compiled,
         tools: vec![],
     }));
-    assert!(matches!(
-        future
-            .as_mut()
-            .poll(&mut Context::from_waker(Waker::noop())),
-        Poll::Ready(Ok(_))
-    ));
+    struct WakeThread(std::thread::Thread);
+    impl std::task::Wake for WakeThread {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = Waker::from(Arc::new(WakeThread(std::thread::current())));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match future.as_mut().poll(&mut Context::from_waker(&waker)) {
+            Poll::Ready(result) => {
+                result.unwrap();
+                break;
+            }
+            Poll::Pending => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "provider future did not wake"
+                );
+                std::thread::park_timeout(std::time::Duration::from_millis(100));
+            }
+        }
+    }
     let requests = transport.0.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert!(serde_json::to_vec(&requests[0]).unwrap().len() <= 2900);

@@ -4,17 +4,20 @@
 //! bearer token and request body, over stdin rather than process arguments.
 
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use agent_harness_core::{
-    BoxFuture, CallId, ModelAdapter, ModelError, ModelRequest, ModelResponse, StopReason,
-    TokenUsage, ToolCall, TranscriptMessage,
+    BoxFuture, CallId, CancellationToken, ModelAdapter, ModelControl, ModelError, ModelProgress,
+    ModelRequest, ModelResponse, RequestTimings, StopReason, TokenUsage, ToolCall,
+    TranscriptMessage,
 };
 use serde_json::{Map, Value, json};
 use thiserror::Error;
+
+mod stream;
+mod transport;
+mod worker;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HttpRequest {
@@ -42,6 +45,46 @@ pub enum TransportError {
 
 pub trait HttpTransport: Send + Sync {
     fn post_json(&self, request: HttpRequest) -> Result<HttpResponse, TransportError>;
+
+    /// Legacy transports remain usable without streaming, but must override
+    /// this method to interrupt an in-flight blocking call.
+    fn post_json_controlled(
+        &self,
+        request: HttpRequest,
+        control: &HttpControl,
+        _on_text: &mut dyn FnMut(String),
+        _timings: &mut RequestTimings,
+    ) -> Result<HttpResponse, TransportError> {
+        control.check()?;
+        if request.body.get("stream").and_then(Value::as_bool) == Some(true) {
+            return Err(TransportError::Protocol(
+                "transport does not support streaming".into(),
+            ));
+        }
+        let response = self.post_json(request)?;
+        control.check()?;
+        Ok(response)
+    }
+}
+
+/// Request-local cancellation also fires when its model future is dropped.
+#[derive(Clone, Default)]
+pub struct HttpControl {
+    cancellation: CancellationToken,
+    abandoned: CancellationToken,
+}
+impl HttpControl {
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled() || self.abandoned.is_cancelled()
+    }
+    fn check(&self) -> Result<(), TransportError> {
+        if self.is_cancelled() {
+            Err(TransportError::Io("request cancelled".into()))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -70,83 +113,6 @@ impl CurlTransport {
     }
 }
 
-impl HttpTransport for CurlTransport {
-    fn post_json(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
-        if !(request.url.starts_with("https://") || request.url.starts_with("http://")) {
-            return Err(TransportError::Protocol(
-                "only http:// and https:// endpoints are supported".to_owned(),
-            ));
-        }
-        let body = serde_json::to_string(&request.body)
-            .map_err(|error| TransportError::Protocol(error.to_string()))?;
-        let mut config = String::new();
-        config.push_str("silent\nshow-error\nrequest = \"POST\"\n");
-        config.push_str(&format!("url = \"{}\"\n", curl_config_escape(&request.url)));
-        config.push_str("proto = \"=http,https\"\n");
-        config.push_str(&format!(
-            "max-time = \"{}\"\n",
-            request.timeout_seconds.max(1)
-        ));
-        for (name, value) in request.headers {
-            if name.contains(['\r', '\n']) || value.contains(['\r', '\n']) {
-                return Err(TransportError::Protocol(
-                    "HTTP headers cannot contain CR or LF".to_owned(),
-                ));
-            }
-            config.push_str(&format!(
-                "header = \"{}\"\n",
-                curl_config_escape(&format!("{name}: {value}"))
-            ));
-        }
-        config.push_str(&format!(
-            "data-binary = \"{}\"\n",
-            curl_config_escape(&body)
-        ));
-        config.push_str("write-out = \"\\n%{http_code}\"\n");
-
-        let mut child = Command::new(&self.binary)
-            .arg("--config")
-            .arg("-")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| TransportError::Io(error.to_string()))?;
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| TransportError::Io("curl stdin was unavailable".to_owned()))?
-            .write_all(config.as_bytes())
-            .map_err(|error| TransportError::Io(error.to_string()))?;
-        let output = child
-            .wait_with_output()
-            .map_err(|error| TransportError::Io(error.to_string()))?;
-        if !output.status.success() {
-            return Err(TransportError::Protocol(
-                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            ));
-        }
-        let output = String::from_utf8(output.stdout)
-            .map_err(|_| TransportError::Protocol("curl returned non-UTF-8 output".to_owned()))?;
-        let (body, status) = output.rsplit_once('\n').ok_or_else(|| {
-            TransportError::Protocol("curl response did not contain an HTTP status".to_owned())
-        })?;
-        let status = status
-            .trim()
-            .parse::<u16>()
-            .map_err(|error| TransportError::Protocol(error.to_string()))?;
-        if !(200..300).contains(&status) {
-            return Err(TransportError::Http {
-                status,
-                body: body.chars().take(4096).collect(),
-            });
-        }
-        let body = serde_json::from_str(body)
-            .map_err(|error| TransportError::Protocol(error.to_string()))?;
-        Ok(HttpResponse { status, body })
-    }
-}
-
 #[derive(Clone)]
 pub struct OpenAiConfig {
     pub endpoint: String,
@@ -171,7 +137,9 @@ impl OpenAiConfig {
     }
 }
 
+#[derive(Clone)]
 pub struct OpenAiCompatibleAdapter {
+    streaming: bool,
     config: OpenAiConfig,
     transport: Arc<dyn HttpTransport>,
     request_budget: Option<(RequestBudget, Arc<dyn RequestTokenCounter>)>,
@@ -200,7 +168,15 @@ impl OpenAiCompatibleAdapter {
             config,
             transport,
             request_budget: None,
+            streaming: false,
         }
+    }
+
+    /// Stream text previews; tool arguments are exposed only in a complete response.
+    #[must_use]
+    pub fn with_streaming(mut self, enabled: bool) -> Self {
+        self.streaming = enabled;
+        self
     }
 
     /// Install accounting for the exact body sent to the transport. Existing
@@ -300,8 +276,24 @@ impl OpenAiCompatibleAdapter {
         Ok(Value::Object(body))
     }
 
-    fn complete_blocking(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
-        let mut body = self.request_body(&request)?;
+    fn complete_blocking(
+        &self,
+        request: &ModelRequest,
+        control: &HttpControl,
+        on_text: &mut dyn FnMut(String),
+        timings: &mut RequestTimings,
+    ) -> Result<ModelResponse, ModelError> {
+        let mut body = self.request_body(request)?;
+        body.as_object_mut()
+            .expect("request object")
+            .remove("stream");
+        body.as_object_mut()
+            .expect("request object")
+            .remove("stream_options");
+        if self.streaming {
+            body["stream"] = json!(true);
+            body["stream_options"] = json!({"include_usage": true});
+        }
         if let Some((budget, counter)) = &self.request_budget {
             let modern = body.get("max_completion_tokens");
             let legacy = body.get("max_tokens");
@@ -345,12 +337,17 @@ impl OpenAiCompatibleAdapter {
         }
         let response = self
             .transport
-            .post_json(HttpRequest {
-                url: self.config.endpoint.clone(),
-                headers,
-                body,
-                timeout_seconds: self.config.timeout_seconds,
-            })
+            .post_json_controlled(
+                HttpRequest {
+                    url: self.config.endpoint.clone(),
+                    headers,
+                    body,
+                    timeout_seconds: self.config.timeout_seconds,
+                },
+                control,
+                on_text,
+                timings,
+            )
             .map_err(|error| ModelError::new(error.to_string(), true))?;
         parse_response(response.body)
     }
@@ -361,7 +358,16 @@ impl ModelAdapter for OpenAiCompatibleAdapter {
         &'a self,
         request: ModelRequest,
     ) -> BoxFuture<'a, Result<ModelResponse, ModelError>> {
-        Box::pin(async move { self.complete_blocking(request) })
+        self.complete_controlled(request, ModelControl::default())
+    }
+
+    fn complete_controlled<'a>(
+        &'a self,
+        request: ModelRequest,
+        control: ModelControl,
+    ) -> BoxFuture<'a, Result<ModelResponse, ModelError>> {
+        let adapter = self.clone();
+        Box::pin(async move { worker::start(adapter, request, control).await })
     }
 }
 

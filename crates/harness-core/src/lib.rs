@@ -32,7 +32,8 @@ pub use executor::{DirectExecutor, RejectingExecutor, ToolExecutor};
 pub use hook::{Hook, HookContext, HookError, HookSet};
 pub use id::{CallId, EventId, ThreadId, TurnId};
 pub use model::{
-    BoxFuture, ModelAdapter, ModelError, ModelRequest, ModelResponse, StopReason, TokenUsage,
+    BoxFuture, ModelAdapter, ModelControl, ModelError, ModelProgress, ModelProgressEvent,
+    ModelProgressObserver, ModelRequest, ModelResponse, RequestTimings, StopReason, TokenUsage,
 };
 pub use policy::{
     Access, CapabilityPolicy, CapabilityProjection, PolicyContext, ToolPolicy, project_capabilities,

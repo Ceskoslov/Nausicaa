@@ -85,7 +85,7 @@ The main extension seams are:
 | `agent-harness-context-fs` | `context-fs` / `context_fs` | Hierarchical `AGENTS.md` rules, skill discovery and selection, transcript compaction, optional archived output retrieval, and context-size enforcement. |
 | `agent-harness-memory` | `memory` / `memory` | In-memory or JSONL advisory memory, lexical recall, and a frozen recall snapshot for each turn. |
 | `agent-harness-executor-process` | `process-executor` / `process_executor` | Workspace-scoped file tools plus explicit local and Linux Bubblewrap process runners. |
-| `agent-harness-provider-openai` | `provider-openai` / `provider_openai` | Non-streaming OpenAI-compatible Chat Completions mapping with a replaceable HTTP transport. |
+| `agent-harness-provider-openai` | `provider-openai` / `provider_openai` | OpenAI-compatible Chat Completions with optional streaming and a replaceable HTTP transport. |
 | `agent-harness-eval` | Standalone CLI; optional `live` feature | Paired offline core/task fixtures, retained evidence and metrics; opt-in pinned provider runs. |
 | `agent-harness-task` | `task` / `task` | Immutable criteria, exact-content acceptance, attempt budgets, retained artifacts, and a versioned task journal. |
 | `agent-harness-task-ledger` | `task-ledger` / `task_ledger` | Idempotent background-task submission, worker leases, heartbeat, cancellation, recovery, and delivery acknowledgement. |
@@ -307,7 +307,7 @@ let outcome = runtime.run_turn(&thread_id, "Do the work").await?;
 println!("{}", outcome.content);
 ```
 
-The core does not select an async runtime. Its public model, approval, executor, and tool boundaries return `BoxFuture`, allowing the embedding application to choose its own executor. The included provider and process implementations are currently blocking internally.
+The core does not select an async runtime. Its public model, approval, executor, and tool boundaries return `BoxFuture`, allowing the embedding application to choose its own executor. The included provider runs supervised curl requests on worker threads and wakes its future; process runners still block internally.
 
 ### Implementing a tool
 
@@ -581,7 +581,21 @@ register tools and grant access through the runtime instead. When no projected
 tools remain, `tool_choice` is removed too. This closes a model-visibility gap for
 empty projections; execution policy checks remain in force.
 
-The adapter currently returns one completed response and performs blocking transport work inside its future. Streaming and automatic retry orchestration are not implemented.
+The adapter runs curl on a worker thread. Opt into SSE with
+`.with_streaming(true)` and attach a `ModelProgressObserver` using
+`AgentRuntime::with_model_observer`. Text deltas are unvalidated previews; only a
+complete HTTP response with a finish reason and `[DONE]` becomes a model response.
+Incomplete streams never expose tool fragments to execution. Non-streaming is
+still the adapter default. Automatic retries are not implemented.
+
+`ModelAdapter::complete_controlled` accepts cancellation and progress observers;
+its default delegates to legacy `complete`. Curl observes cancellation (including
+a dropped request future), kills the child and arranges reaping. Custom transports
+must override `post_json_controlled` to support streaming or in-flight cancellation.
+Request diagnostics expose DNS, TCP and TLS durations, first-byte and first-text
+elapsed times, and total host elapsed time. First byte includes headers/keepalives;
+it is not first model text or a measurement of upstream queue time. Missing timings
+are unknown, especially on cancellation or transport failure.
 
 ## Development and verification
 
@@ -601,12 +615,12 @@ The core integration tests cover capability restriction, exact-action approval, 
 ## Current limitations
 
 - Normal turn completion is not independent task acceptance. The optional task layer checks exact artifact contents supplied by a trusted host; it is not a general code evaluator or automatic scheduler. The paired offline evaluation runner measures this narrow baseline.
-- The included provider supports non-streaming Chat Completions only. Its curl transport is blocking, and the core does not automatically retry `ModelError` values marked retryable.
+- The included provider supports Chat Completions, with optional SSE. It uses worker threads, not a native async HTTP client; the core does not automatically retry `ModelError` values marked retryable.
 - Deterministic compaction drops complete old message groups and records the count; it does not generate a semantic summary. The character cap is an approximate byte-size check. Optional final provider-request budgeting requires a trusted model-specific token counter; optional output externalization retains original durable receipts and requires explicitly authorized retrieval.
 - JSONL stores provide synchronized append and `sync_data` durability within one process, not cross-process distributed locking.
 - Only the core event store repairs incomplete final JSONL records; the memory and task-ledger stores still reject malformed tails.
 - Bubblewrap is the only included operating-system sandbox and is Linux-specific. Container, VM, SSH, and cloud-sandbox executors remain extension points.
-- Cancellation is cooperative. A blocking provider or process runner may not observe it until the current blocking operation returns.
+- Cancellation interrupts built-in curl requests. Legacy model adapters, custom blocking transports and process runners may only observe it after their blocking operation returns.
 - The app server's background-turn status table is process-local even when runtime events use durable storage.
 - The task ledger has recovery semantics but no resident gateway, routing layer, or distributed worker implementation.
 - Parent/child capability intersection is implemented, but a complete subagent/worktree scheduler is not included.

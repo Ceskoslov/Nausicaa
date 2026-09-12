@@ -11,7 +11,9 @@ use crate::event::{EventEnvelope, EventObserver, HookPoint, RuntimeEvent};
 use crate::executor::{RejectingExecutor, ToolExecutor};
 use crate::hook::{HookContext, HookError, HookSet};
 use crate::id::{CallId, ThreadId, TurnId};
-use crate::model::{ModelAdapter, ModelError, ModelRequest, StopReason};
+use crate::model::{
+    ModelAdapter, ModelControl, ModelError, ModelProgressObserver, ModelRequest, StopReason,
+};
 use crate::policy::{CapabilityProjection, PolicyContext, ToolPolicy, project_capabilities};
 use crate::protocol::{ToolCall, ToolReceipt, TranscriptMessage};
 use crate::recovery::{RecoveryReport, recover_thread};
@@ -97,6 +99,7 @@ pub struct AgentRuntime {
     executor: Arc<dyn ToolExecutor>,
     hooks: HookSet,
     observers: Vec<Arc<dyn EventObserver>>,
+    model_observer: Option<Arc<dyn ModelProgressObserver>>,
     config: RuntimeConfig,
     active_threads: Mutex<BTreeSet<ThreadId>>,
 }
@@ -122,6 +125,7 @@ impl AgentRuntime {
             executor: Arc::new(RejectingExecutor),
             hooks: HookSet::default(),
             observers: Vec::new(),
+            model_observer: None,
             config: RuntimeConfig::default(),
             active_threads: Mutex::new(BTreeSet::new()),
         }
@@ -166,6 +170,12 @@ impl AgentRuntime {
     #[must_use]
     pub fn with_config(mut self, config: RuntimeConfig) -> Self {
         self.config = config;
+        self
+    }
+
+    #[must_use]
+    pub fn with_model_observer(mut self, observer: Arc<dyn ModelProgressObserver>) -> Self {
+        self.model_observer = Some(observer);
         self
     }
 
@@ -317,17 +327,26 @@ impl AgentRuntime {
 
             let response = match self
                 .model
-                .complete(ModelRequest {
-                    thread_id: thread_id.clone(),
-                    turn_id: turn_id.clone(),
-                    iteration,
-                    context: compiled,
-                    tools: visible_tools.clone(),
-                })
+                .complete_controlled(
+                    ModelRequest {
+                        thread_id: thread_id.clone(),
+                        turn_id: turn_id.clone(),
+                        iteration,
+                        context: compiled,
+                        tools: visible_tools.clone(),
+                    },
+                    ModelControl {
+                        cancellation: cancellation.clone(),
+                        observer: self.model_observer.clone(),
+                    },
+                )
                 .await
             {
                 Ok(response) => response,
                 Err(error) => {
+                    if cancellation.is_cancelled() {
+                        return self.cancel_turn(thread_id, &turn_id, &[]);
+                    }
                     self.fail_turn(thread_id, &turn_id, error.to_string())?;
                     return Err(error.into());
                 }
