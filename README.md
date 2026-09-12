@@ -226,6 +226,7 @@ cargo run -p agent-harness-tui -- --workspace .
 --temperature <n>     Sampling temperature (0–2; omitted by default)
 --max-model-iterations <n> Requests per turn (1–128; default 32)
 --history-groups <n>  Complete transcript groups retained (1–2000; default 200)
+--no-stream           Disable SSE for endpoints that only support JSON replies
 --no-tools            Do not register the workspace tools
 --unsafe-local-exec   Run shell commands directly on the host
 -h, --help            Show command help
@@ -248,7 +249,8 @@ Inside the TUI:
 
 - Enter sends a message when no turn is active.
 - `/cancel` requests cancellation of the active turn.
-- `/quit`, `/exit`, Escape, or Ctrl-C exits.
+- Ctrl-C cancels an active turn and stays in the UI; when idle it exits.
+- `/quit`, `/exit`, or Escape exits (Escape denies an approval when one is shown).
 - `y` approves the displayed canonical action.
 - `n` or Escape denies a pending approval.
 
@@ -261,6 +263,30 @@ The default tool policy is:
 | `shell` | `Ask` | Uses Bubblewrap by default, with no network and the workspace as its only writable host bind. |
 
 TUI events are stored at `<workspace>/.agent-harness/events.jsonl`.
+
+Live requests use SSE by default; use `--no-stream` for endpoints without SSE.
+The live preview is labelled **draft (unvalidated)** and keeps only the latest
+64 KiB. A validated durable assistant message replaces it; interrupted drafts are
+cleared and never replayed. Tool arguments are not streamed into execution.
+The status line shows elapsed request/turn time and waiting, receiving, approval,
+tool-execution or cancelling state. Cancellation also denies pending approvals.
+Exit requests cancellation and waits up to two seconds for the turn worker.
+Legacy adapters and blocking shell runners may take longer to stop.
+
+Each finished model request shows DNS/TCP/TLS durations, elapsed time to first
+byte and first text, and total request time. `unknown` means no measurement, not
+zero. First byte may be headers or keepalives, and these measurements cannot split
+upstream queue time from inference. They help distinguish connection overhead
+from time spent waiting for visible output; they do not make a slow endpoint faster.
+
+The same request metrics are appended to
+`<workspace>/.agent-harness/request-metrics.jsonl` (version 1), with thread/turn/
+iteration identity and completed/failed/cancelled outcome. This separate diagnostic
+file excludes prompts, generated text, tool arguments and credentials. It is
+best-effort, not fsynced execution evidence; write errors are shown in the UI.
+Completed HTTP requests do not establish task acceptance. Existing event journals
+need no migration. UI progress coalesces tokens and retains at most 16 pending
+request summaries; the metric file is not rotated automatically.
 
 > **Warning:** `--unsafe-local-exec` selects `LocalProcessRunner`. Shell commands then inherit host-level process access and are not sandboxed. The conspicuous option name is intentional.
 

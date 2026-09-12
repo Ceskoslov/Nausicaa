@@ -121,12 +121,22 @@ embedding boundary; production model tokenizers, token-driven automatic
 compaction, archive indexing/GC, and cumulative task budgets remain extensions.
 The next ordered implementation area is Editing tools.
 
-**TUI request configuration:** validated CLI/environment settings now expose the
+**TUI requests, progress and cancellation:** validated CLI/environment settings now expose the
 model request timeout, completion-token cap, temperature, per-turn iteration
-limit, and retained transcript groups. This is the first provider/TUI slice;
-the provider now supports text progress, phase timings and cancellation of
-in-flight curl requests. TUI display integration is next. Native async HTTP and
-automatic retry remain proposed.
+limit, and retained transcript groups. The provider and TUI now support bounded draft text, phase timings with a separate
+version-1 metrics file, and cancellation of in-flight curl requests. Local HTTP
+tests cover previews before completion, cancellation closing the connection and
+missing stream terminators; UI tests cover stale previews and metric privacy.
+Native async HTTP, automatic retry and immediate shell cancellation remain proposed.
+
+Validation on 2026-09-12 also exercised the actual TUI against a local SSE fixture:
+preview display, active Ctrl-C staying in the UI, socket closure, cancellation in
+the journal, metrics without draft text, and idle Ctrl-C exit all passed. A single
+live TUI request to `nvidia/nemotron-3.5-lightning:free` (256-token cap, no tools)
+hit its 60-second deadline at 60,002 ms without visible text. The failure metric
+was recorded; network phases were unavailable. This does not establish live SSE
+compatibility or identify upstream queue versus network delay. Live credentials
+remain unnecessary for deterministic tests.
 
 Reserve verification time in a task budget rather than spending the entire budget
 on generation. Automatic compaction or resumption must preserve user constraints

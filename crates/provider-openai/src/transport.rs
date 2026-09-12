@@ -306,6 +306,145 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(2));
         server.join().unwrap();
     }
+    struct ProgressSender(mpsc::Sender<agent_harness_core::ModelProgressEvent>);
+    impl agent_harness_core::ModelProgressObserver for ProgressSender {
+        fn on_progress(&self, event: &agent_harness_core::ModelProgressEvent) {
+            let _ = self.0.send(event.clone());
+        }
+    }
+
+    #[test]
+    fn dropping_pending_future_cancels_only_its_request_and_reports_timings() {
+        use agent_harness_core::{CompiledContext, ThreadId, TurnId};
+        use std::task::{Context, Poll, Waker};
+        let (url, server) = server("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"draft\"},\"finish_reason\":null}]}\n\n".into(),true);
+        let adapter = OpenAiCompatibleAdapter::new(
+            OpenAiConfig::new(url, "fixture"),
+            Arc::new(CurlTransport::new()),
+        )
+        .with_streaming(true);
+        let (sender, receiver) = mpsc::channel();
+        let cancellation = CancellationToken::new();
+        let mut future = adapter.complete_controlled(
+            ModelRequest {
+                thread_id: ThreadId::new(),
+                turn_id: TurnId::new(),
+                iteration: 0,
+                context: CompiledContext {
+                    prompt: vec![],
+                    messages: vec![],
+                },
+                tools: vec![],
+            },
+            ModelControl {
+                cancellation: cancellation.clone(),
+                observer: Some(Arc::new(ProgressSender(sender))),
+            },
+        );
+        assert!(matches!(
+            future
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Pending
+        ));
+        loop {
+            if matches!(
+                receiver
+                    .recv_timeout(Duration::from_secs(3))
+                    .unwrap()
+                    .progress,
+                ModelProgress::TextDelta { .. }
+            ) {
+                break;
+            }
+        }
+        drop(future);
+        loop {
+            if let ModelProgress::Finished { timings, outcome } = receiver
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap()
+                .progress
+            {
+                assert_eq!(outcome, "cancelled");
+                assert!(timings.first_text_ms.is_some());
+                assert!(timings.total_ms < 2000);
+                break;
+            }
+        }
+        assert!(!cancellation.is_cancelled());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn cancellation_with_partial_tool_stream_persists_cancelled_without_assistant() {
+        use agent_harness_core::{
+            AgentRuntime, CapabilityPolicy, LayeredContextCompiler, MemoryEventStore, RuntimeError,
+            RuntimeEvent, ToolRegistry,
+        };
+        use std::task::{Context, Poll, Waker};
+        let (url,server) = server("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"draft\",\"tool_calls\":[{\"index\":0,\"id\":\"call-a\",\"function\":{\"name\":\"write_file\",\"arguments\":\"{\"}}]},\"finish_reason\":null}]}\n\n".into(),true);
+        let (sender, receiver) = mpsc::channel();
+        let store = Arc::new(MemoryEventStore::new());
+        let runtime = AgentRuntime::new(
+            Arc::new(
+                OpenAiCompatibleAdapter::new(
+                    OpenAiConfig::new(url, "fixture"),
+                    Arc::new(CurlTransport::new()),
+                )
+                .with_streaming(true),
+            ),
+            store.clone(),
+            Arc::new(LayeredContextCompiler::default()),
+            ToolRegistry::new(),
+            Arc::new(CapabilityPolicy::deny_by_default()),
+        )
+        .with_model_observer(Arc::new(ProgressSender(sender)));
+        let thread = runtime.start_thread().unwrap();
+        let cancellation = CancellationToken::new();
+        let mut future =
+            Box::pin(runtime.run_turn_with_cancellation(&thread, "test", cancellation.clone()));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+        loop {
+            if matches!(
+                receiver
+                    .recv_timeout(Duration::from_secs(3))
+                    .unwrap()
+                    .progress,
+                ModelProgress::TextDelta { .. }
+            ) {
+                break;
+            }
+        }
+        cancellation.cancel();
+        let start = Instant::now();
+        loop {
+            match future.as_mut().poll(&mut cx) {
+                Poll::Ready(result) => {
+                    assert!(matches!(result, Err(RuntimeError::Cancelled(_))));
+                    break;
+                }
+                Poll::Pending => {
+                    assert!(start.elapsed() < Duration::from_secs(3));
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
+        let events = store.all_events().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e.event, RuntimeEvent::TurnCancelled))
+        );
+        assert!(!events.iter().any(|e| matches!(
+            e.event,
+            RuntimeEvent::AssistantMessage { .. }
+                | RuntimeEvent::ToolExecutionStarted { .. }
+                | RuntimeEvent::TurnFailed { .. }
+        )));
+        server.join().unwrap();
+    }
+
     #[test]
     fn completed_stream_records_network_phases_and_missing_done_fails() {
         for done in [true, false] {

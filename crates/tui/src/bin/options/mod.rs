@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub struct Options {
     pub demo: bool,
+    pub no_stream: bool,
     pub no_tools: bool,
     pub unsafe_local: bool,
     pub workspace: Option<String>,
@@ -22,7 +23,7 @@ impl Options {
         let mut iter = args.iter();
         while let Some(arg) = iter.next() {
             match arg.as_str() {
-                "--demo" | "--no-tools" | "--unsafe-local-exec" => {
+                "--demo" | "--no-tools" | "--unsafe-local-exec" | "--no-stream" => {
                     if !flags.insert(arg.as_str()) {
                         return Err(format!("duplicate option: {arg}"));
                     }
@@ -72,6 +73,7 @@ impl Options {
         }
         Ok(Self {
             demo,
+            no_stream: flags.contains("--no-stream"),
             no_tools: flags.contains("--no-tools"),
             unsafe_local: flags.contains("--unsafe-local-exec"),
             workspace: values.get("--workspace").cloned(),

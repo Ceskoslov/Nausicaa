@@ -6,11 +6,15 @@ use std::io::{Stdout, Write, stdout};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+mod progress;
+pub use progress::ModelProgressBuffer;
 
 use agent_harness_core::{
     AgentRuntime, ApprovalDecision, ApprovalError, ApprovalProvider, ApprovalRequest, BoxFuture,
-    CancellationToken, EventEnvelope, EventObserver, ReceiptStatus, RuntimeEvent, ThreadId,
+    CancellationToken, EventEnvelope, EventObserver, ModelProgress, ReceiptStatus, RuntimeEvent,
+    ThreadId, TurnId,
 };
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -100,6 +104,24 @@ pub fn run(
     approvals: Receiver<ApprovalPrompt>,
     config: TuiConfig,
 ) -> Result<(), TuiError> {
+    run_with_model_progress(
+        runtime,
+        thread_id,
+        events,
+        approvals,
+        config,
+        Arc::new(ModelProgressBuffer::default()),
+    )
+}
+
+pub fn run_with_model_progress(
+    runtime: Arc<AgentRuntime>,
+    thread_id: ThreadId,
+    events: Receiver<EventEnvelope>,
+    approvals: Receiver<ApprovalPrompt>,
+    config: TuiConfig,
+    progress: Arc<ModelProgressBuffer>,
+) -> Result<(), TuiError> {
     let mut terminal = TerminalSession::enter()?;
     let (turn_sender, turn_receiver) = mpsc::channel::<Result<String, String>>();
     let mut state = UiState::new(thread_id);
@@ -107,14 +129,16 @@ pub fn run(
 
     loop {
         dirty |= drain_events(&events, &mut state, config.maximum_log_entries);
+        dirty |= drain_progress(&progress, &mut state);
         dirty |= drain_approvals(&approvals, &mut state);
         match turn_receiver.try_recv() {
             Ok(result) => {
                 dirty = true;
                 state.running = false;
                 state.cancellation = None;
+                state.draft.clear();
                 match result {
-                    Ok(content) => state.push_log(format!("turn complete: {content}")),
+                    Ok(_) => {}
                     Err(error) => state.push_log(format!("turn failed: {error}")),
                 }
             }
@@ -125,7 +149,7 @@ pub fn run(
             }
             Err(TryRecvError::Disconnected) => {}
         }
-        if dirty {
+        if dirty || state.running {
             render(terminal.stdout(), &state, &config)?;
             dirty = false;
         }
@@ -153,6 +177,21 @@ pub fn run(
             if let Some(cancellation) = &state.cancellation {
                 cancellation.cancel();
             }
+            if state.running {
+                // Keep draining/denying approvals while the cancelled worker
+                // closes the model call; never leave an approval receiver stuck.
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while Instant::now() < deadline {
+                    drain_approvals(&approvals, &mut state);
+                    deny_pending(&mut state);
+                    if turn_receiver
+                        .recv_timeout(Duration::from_millis(20))
+                        .is_ok()
+                    {
+                        break;
+                    }
+                }
+            }
             break;
         }
     }
@@ -161,6 +200,13 @@ pub fn run(
 
 struct UiState {
     thread_id: ThreadId,
+    current_turn: Option<TurnId>,
+    iteration: usize,
+    settled: bool,
+    draft: String,
+    started: Option<Instant>,
+    phase_started: Option<Instant>,
+    phase: &'static str,
     input: String,
     logs: VecDeque<String>,
     running: bool,
@@ -173,6 +219,13 @@ impl UiState {
     fn new(thread_id: ThreadId) -> Self {
         let mut state = Self {
             thread_id,
+            current_turn: None,
+            iteration: 0,
+            settled: true,
+            draft: String::new(),
+            started: None,
+            phase_started: None,
+            phase: "ready",
             input: String::new(),
             logs: VecDeque::new(),
             running: false,
@@ -189,6 +242,15 @@ impl UiState {
     }
 }
 
+impl Drop for UiState {
+    fn drop(&mut self) {
+        if let Some(cancellation) = &self.cancellation {
+            cancellation.cancel();
+        }
+        deny_pending(self);
+    }
+}
+
 fn handle_key(
     key: KeyEvent,
     runtime: &Arc<AgentRuntime>,
@@ -197,6 +259,10 @@ fn handle_key(
     maximum_logs: usize,
 ) -> bool {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        if state.running {
+            cancel(state);
+            return false;
+        }
         return true;
     }
     if state.current_approval.is_some() {
@@ -221,17 +287,16 @@ fn handle_key(
             match input.as_str() {
                 "" => {}
                 "/quit" | "/exit" => return true,
-                "/cancel" => {
-                    if let Some(cancellation) = &state.cancellation {
-                        cancellation.cancel();
-                        state.push_log("cancellation requested".to_owned());
-                    }
-                }
+                "/cancel" => cancel(state),
                 _ if state.running => {
                     state.push_log("a turn is already running".to_owned());
                 }
                 _ => {
                     state.running = true;
+                    state.started = Some(Instant::now());
+                    state.phase_started = state.started;
+                    state.phase = "preparing";
+                    state.draft.clear();
                     let cancellation = CancellationToken::new();
                     state.cancellation = Some(cancellation.clone());
                     state.push_log(format!("you: {input}"));
@@ -259,6 +324,54 @@ fn handle_key(
     false
 }
 
+fn cancel(state: &mut UiState) {
+    if let Some(cancellation) = &state.cancellation {
+        cancellation.cancel();
+        state.draft.clear();
+        state.push_log("cancellation requested".into());
+    }
+    deny_pending(state);
+}
+
+fn drain_progress(progress: &ModelProgressBuffer, state: &mut UiState) -> bool {
+    let snapshot = progress.take();
+    let mut changed = false;
+    if let Some(event) = snapshot.draft
+        && event.thread_id == state.thread_id
+        && Some(&event.turn_id) == state.current_turn.as_ref()
+        && event.iteration == state.iteration
+        && !state.settled
+        && !state
+            .cancellation
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        && let ModelProgress::TextDelta { text } = event.progress
+    {
+        progress::append_bounded(&mut state.draft, &text);
+        state.phase = "receiving model text";
+        changed = true;
+    }
+    for event in snapshot.completed {
+        if event.thread_id != state.thread_id {
+            continue;
+        }
+        if let ModelProgress::Finished {
+            timings: t,
+            outcome,
+        } = event.progress
+        {
+            let ms = |v: Option<u64>| v.map_or("unknown".into(), |n| format!("{n}ms"));
+            state.push_log(format!("request {} {outcome}: DNS {} TCP {} TLS {} | first byte {} first text {} | total {}ms",event.iteration,ms(t.dns_ms),ms(t.tcp_connect_ms),ms(t.tls_ms),ms(t.first_byte_ms),ms(t.first_text_ms),t.total_ms));
+            changed = true;
+        }
+    }
+    if let Some(error) = snapshot.error {
+        state.push_log(error);
+        changed = true;
+    }
+    changed
+}
+
 fn drain_events(
     events: &Receiver<EventEnvelope>,
     state: &mut UiState,
@@ -266,6 +379,40 @@ fn drain_events(
 ) -> bool {
     let mut changed = false;
     while let Ok(event) = events.try_recv() {
+        if event.thread_id != state.thread_id {
+            continue;
+        }
+        match &event.event {
+            RuntimeEvent::TurnStarted => {
+                state.current_turn = event.turn_id.clone();
+                state.draft.clear();
+                state.settled = true;
+            }
+            RuntimeEvent::ModelRequestStarted { iteration } => {
+                state.iteration = *iteration;
+                state.settled = false;
+                state.draft.clear();
+                state.phase = "waiting for model";
+                state.phase_started = Some(Instant::now());
+            }
+            RuntimeEvent::AssistantMessage { .. }
+            | RuntimeEvent::TurnCompleted { .. }
+            | RuntimeEvent::TurnCancelled
+            | RuntimeEvent::TurnFailed { .. } => {
+                state.settled = true;
+                state.draft.clear();
+                state.phase = "processing";
+            }
+            RuntimeEvent::ToolExecutionStarted { .. } => {
+                state.phase = "executing tool";
+                state.phase_started = Some(Instant::now());
+            }
+            RuntimeEvent::ApprovalRequested { .. } => {
+                state.phase = "awaiting approval";
+                state.phase_started = Some(Instant::now());
+            }
+            _ => {}
+        }
         if let Some(line) = format_event(&event.event) {
             state.push_log(line);
             changed = true;
@@ -281,7 +428,15 @@ fn drain_approvals(approvals: &Receiver<ApprovalPrompt>, state: &mut UiState) ->
     let mut changed = false;
     while let Ok(prompt) = approvals.try_recv() {
         changed = true;
-        if state.current_approval.is_none() {
+        if state
+            .cancellation
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            let _ = prompt.response.send(ApprovalDecision::Denied {
+                reason: "turn cancelled in TUI".into(),
+            });
+        } else if state.current_approval.is_none() {
             state.current_approval = Some(prompt);
         } else {
             state.queued_approvals.push_back(prompt);
@@ -356,6 +511,7 @@ fn format_event(event: &RuntimeEvent) -> Option<String> {
                 .or_else(|| receipt.error.clone())
                 .unwrap_or_default()
         )),
+        RuntimeEvent::TurnCompleted { .. } => Some("turn complete".to_owned()),
         RuntimeEvent::TurnCancelled => Some("turn cancelled".to_owned()),
         RuntimeEvent::TurnFailed { error } => Some(format!("turn failed: {error}")),
         _ => None,
@@ -367,11 +523,17 @@ fn render(stdout: &mut Stdout, state: &UiState, config: &TuiConfig) -> Result<()
     let width = usize::from(width.max(20));
     let approval_height = usize::from(state.current_approval.is_some()) * 4;
     let log_height = usize::from(height).saturating_sub(4 + approval_height);
-    let wrapped = state
+    let mut wrapped = state
         .logs
         .iter()
         .flat_map(|line| wrap_line(line, width.saturating_sub(2)))
         .collect::<Vec<_>>();
+    if !state.draft.is_empty() {
+        wrapped.extend(wrap_line(
+            &format!("draft (unvalidated): {}", state.draft),
+            width.saturating_sub(2),
+        ));
+    }
     let visible_start = wrapped.len().saturating_sub(log_height);
 
     queue!(
@@ -396,7 +558,26 @@ fn render(stdout: &mut Stdout, state: &UiState, config: &TuiConfig) -> Result<()
             ResetColor
         )?;
     }
-    let status = if state.running { "running" } else { "ready" };
+    let status = if state.running {
+        let phase = if state
+            .cancellation
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            "cancelling"
+        } else {
+            state.phase
+        };
+        format!(
+            "{phase} {:.1}s | turn {:.1}s | Ctrl+C cancels",
+            state
+                .phase_started
+                .map_or(0.0, |s| s.elapsed().as_secs_f64()),
+            state.started.map_or(0.0, |s| s.elapsed().as_secs_f64())
+        )
+    } else {
+        "ready | Ctrl+C exits".into()
+    };
     queue!(
         stdout,
         MoveTo(0, height.saturating_sub(2)),
@@ -417,7 +598,7 @@ fn wrap_line(line: &str, width: usize) -> Vec<String> {
     }
     let mut lines = Vec::new();
     let mut current = String::new();
-    for character in line.chars() {
+    for character in line.chars().filter(|c| !c.is_control() || *c == '\n') {
         if character == '\n' || current.chars().count() >= width {
             lines.push(std::mem::take(&mut current));
             if character == '\n' {
@@ -433,11 +614,18 @@ fn wrap_line(line: &str, width: usize) -> Vec<String> {
 fn block_on<F: std::future::Future>(future: F) -> F::Output {
     use std::task::{Context, Poll, Waker};
     let mut future = std::pin::pin!(future);
-    let mut context = Context::from_waker(Waker::noop());
+    struct WakeThread(thread::Thread);
+    impl std::task::Wake for WakeThread {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = Waker::from(Arc::new(WakeThread(thread::current())));
+    let mut context = Context::from_waker(&waker);
     loop {
         match future.as_mut().poll(&mut context) {
             Poll::Ready(output) => return output,
-            Poll::Pending => thread::yield_now(),
+            Poll::Pending => thread::park(),
         }
     }
 }
@@ -480,6 +668,53 @@ mod tests {
     fn wrapping_is_deterministic() {
         assert_eq!(wrap_line("abcdef", 3), vec!["abc", "def"]);
         assert_eq!(wrap_line("a\nb", 3), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn preview_settlement_and_cancellation_reject_stale_deltas() {
+        use agent_harness_core::{EventId, ModelProgressEvent, ModelProgressObserver};
+        let progress = ModelProgressBuffer::default();
+        let mut state = UiState::new(ThreadId::new());
+        let turn = TurnId::new();
+        state.current_turn = Some(turn.clone());
+        state.settled = false;
+        state.running = true;
+        state.cancellation = Some(CancellationToken::new());
+        let event = ModelProgressEvent {
+            thread_id: state.thread_id.clone(),
+            turn_id: turn.clone(),
+            iteration: 0,
+            progress: ModelProgress::TextDelta {
+                text: "preview".into(),
+            },
+        };
+        progress.on_progress(&event);
+        assert!(drain_progress(&progress, &mut state));
+        assert_eq!(state.draft, "preview");
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(EventEnvelope {
+                id: EventId::new(),
+                sequence: 1,
+                at_unix_ms: 0,
+                thread_id: state.thread_id.clone(),
+                turn_id: Some(turn),
+                event: RuntimeEvent::TurnCompleted {
+                    content: "final".into(),
+                },
+            })
+            .unwrap();
+        drain_events(&receiver, &mut state, 100);
+        progress.on_progress(&event);
+        drain_progress(&progress, &mut state);
+        assert!(state.draft.is_empty());
+        state.settled = false;
+        cancel(&mut state);
+        progress.on_progress(&event);
+        drain_progress(&progress, &mut state);
+        assert!(state.draft.is_empty());
+        assert!(state.cancellation.as_ref().unwrap().is_cancelled());
+        assert_eq!(wrap_line("a\u{1b}\r\u{7}b", 20), vec!["ab"]);
     }
 
     #[test]

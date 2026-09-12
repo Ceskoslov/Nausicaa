@@ -15,7 +15,7 @@ use agent_harness_executor_process::{
     BubblewrapRunner, LocalProcessRunner, ProcessRunner, register_workspace_tools,
 };
 use agent_harness_provider_openai::{CurlTransport, OpenAiCompatibleAdapter};
-use agent_harness_tui::{TuiConfig, approval_channel, event_channel};
+use agent_harness_tui::{ModelProgressBuffer, TuiConfig, approval_channel, event_channel};
 
 struct DemoModel;
 
@@ -65,10 +65,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .or_else(|_| env::var("OPENAI_API_KEY"))
                 .ok(),
         );
-        Arc::new(OpenAiCompatibleAdapter::new(
-            config,
-            Arc::new(CurlTransport::new()),
-        ))
+        Arc::new(
+            OpenAiCompatibleAdapter::new(config, Arc::new(CurlTransport::new()))
+                .with_streaming(!options.no_stream),
+        )
     };
 
     let mut tools = ToolRegistry::new();
@@ -101,6 +101,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(&state_directory)?;
     let (approval_provider, approval_receiver) = approval_channel();
     let (observer, event_receiver) = event_channel();
+    let progress = Arc::new(ModelProgressBuffer::open(
+        state_directory.join("request-metrics.jsonl"),
+    )?);
     let policy = CapabilityPolicy::deny_by_default()
         .grant("read_file", Access::Allow)
         .grant("write_file", Access::Ask)
@@ -116,6 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_executor(Arc::new(DirectExecutor))
         .with_approval_provider(approval_provider)
         .with_observer(observer)
+        .with_model_observer(progress.clone())
         .with_config(RuntimeConfig {
             workspace: Some(workspace.clone()),
             max_model_iterations: options.max_model_iterations,
@@ -123,7 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
     );
     let thread_id = runtime.start_thread()?;
-    agent_harness_tui::run(
+    agent_harness_tui::run_with_model_progress(
         runtime,
         thread_id,
         event_receiver,
@@ -132,6 +136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             title: format!("Agent Harness — {}", workspace.display()),
             ..TuiConfig::default()
         },
+        progress,
     )?;
     Ok(())
 }
@@ -149,6 +154,7 @@ fn print_help() {
            --temperature <n>     Sampling temperature (0–2; provider default if absent)\n\
            --max-model-iterations <n> Per-turn request limit (1–128; default 32)\n\
            --history-groups <n>  Retained complete transcript groups (1–2000; default 200)\n\
+           --no-stream           Use complete JSON responses instead of SSE\n\
            --no-tools            Disable workspace tools\n\
            --unsafe-local-exec   Run shell on the host instead of Bubblewrap\n\
            -h, --help            Show this help\n\n\

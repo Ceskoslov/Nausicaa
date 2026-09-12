@@ -331,8 +331,8 @@ transcript groups to 200 (1–2000). Temperature is optional (finite, 0–2). In
 duplicate and unknown options are rejected. These settings configure existing
 provider/runtime/context boundaries; they do not grant tools or change journals.
 The new default output cap is an intentional TUI behavior change; the provider
-library constructor remains unchanged. Streaming and transport cancellation are
-still separate implementation work at this configuration step.
+library constructor remains non-streaming by default; the TUI enables SSE unless
+`--no-stream` is selected.
 
 
 ## Model progress and request cancellation
@@ -356,3 +356,23 @@ Diagnostics do not identify provider queue or inference time separately. Observe
 callbacks run on the request worker and should return promptly. A custom transport
 must implement the additive controlled method for interruptible streaming; its
 legacy fallback only checks cancellation before and after the blocking call.
+
+
+## TUI progress ownership
+
+`run_with_model_progress` is additive; existing `run` callers keep their API.
+The executable shares a `ModelProgressBuffer` with the runtime's model observer.
+It coalesces text into a 64 KiB UTF-8 tail, stores at most 16 pending summaries,
+and writes only finished request metrics to a separate version-1 JSONL diagnostic
+file. Text deltas never enter that file or the durable runtime journal. Metrics
+writes are best-effort and not fsynced; failures appear in the UI. No rotation is
+provided. Rendering strips text control characters and labels drafts unvalidated.
+
+Preview identity is thread/turn/iteration. Durable assistant or terminal events
+settle it; late deltas cannot revive a settled or cancelled draft. Final assistant
+content is rendered from the durable event once, without a second copy from the
+worker result. The status timer uses the UI's monotonic clock and refreshes while
+waiting; network phase timings come from the provider. Ctrl-C during a turn cancels
+and denies approvals; idle Ctrl-C exits. Exit waits at most two seconds while
+rejecting approvals, and state drop also signals cancellation on terminal errors.
+The TUI worker executor parks until woken instead of polling in a busy loop.
