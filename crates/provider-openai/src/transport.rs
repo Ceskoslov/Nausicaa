@@ -287,6 +287,20 @@ mod tests {
         }
     }
     #[test]
+    fn interior_header_newlines_are_rejected_before_spawning_transport() {
+        for value in ["Bearer fixture\rkey", "Bearer fixture\nkey"] {
+            let mut request = request("https://example.test".into());
+            request.headers.insert("Authorization".into(), value.into());
+            let result = CurlTransport::new()
+                .with_binary("/nonexistent-nausicaa-curl")
+                .post_json(request);
+            assert!(
+                matches!(result,Err(TransportError::Protocol(message)) if message == "HTTP headers cannot contain CR or LF")
+            );
+        }
+    }
+
+    #[test]
     fn streaming_delivers_preview_before_completion_and_cancels_open_socket() {
         let (url,server) = server("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n".into(),true);
         let control = HttpControl::default();

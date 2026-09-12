@@ -144,7 +144,9 @@ remain unnecessary for deterministic tests.
 The subsequent [DeepSeek validation](crates/provider-openai/reports/2026-09-12-deepseek.md)
 completed real short and streaming replies, cancelled an active streamed reply,
 and passed one exact-approved Bubblewrap tool round trip.
-This confirms the tested endpoint's SSE compatibility; it does not explain the
+A subsequent manual-start regression also covers CRLF keys loaded via shell
+command substitution: the TUI trims surrounding whitespace, while transport
+validation continues to reject interior header newlines. This confirms the tested endpoint's SSE compatibility; it does not explain the
 previous free-route timeout. The actual TUI also cancelled an explicitly approved
 shell on each of the local and Bubblewrap backends in 51 ms, preserving an
 unknown-effect receipt before turn cancellation.

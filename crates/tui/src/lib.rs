@@ -134,13 +134,10 @@ pub fn run_with_model_progress(
         match turn_receiver.try_recv() {
             Ok(result) => {
                 dirty = true;
-                state.running = false;
-                state.cancellation = None;
-                state.draft.clear();
-                match result {
-                    Ok(_) => {}
-                    Err(error) => state.push_log(format!("turn failed: {error}")),
-                }
+                // Receiving the worker result guarantees its prior durable
+                // events were sent. Drain again to avoid cross-channel races.
+                drain_events(&events, &mut state, config.maximum_log_entries);
+                finish_turn(result, &mut state);
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) if state.running => {
@@ -203,6 +200,7 @@ struct UiState {
     current_turn: Option<TurnId>,
     iteration: usize,
     settled: bool,
+    terminal_reported: bool,
     draft: String,
     started: Option<Instant>,
     phase_started: Option<Instant>,
@@ -222,6 +220,7 @@ impl UiState {
             current_turn: None,
             iteration: 0,
             settled: true,
+            terminal_reported: false,
             draft: String::new(),
             started: None,
             phase_started: None,
@@ -293,6 +292,7 @@ fn handle_key(
                 }
                 _ => {
                     state.running = true;
+                    state.terminal_reported = false;
                     state.started = Some(Instant::now());
                     state.phase_started = state.started;
                     state.phase = "preparing";
@@ -322,6 +322,17 @@ fn handle_key(
         state.logs.pop_front();
     }
     false
+}
+
+fn finish_turn(result: Result<String, String>, state: &mut UiState) {
+    state.running = false;
+    state.cancellation = None;
+    state.draft.clear();
+    if !state.terminal_reported
+        && let Err(error) = result
+    {
+        state.push_log(format!("turn failed: {error}"));
+    }
 }
 
 fn cancel(state: &mut UiState) {
@@ -381,6 +392,14 @@ fn drain_events(
     while let Ok(event) = events.try_recv() {
         if event.thread_id != state.thread_id {
             continue;
+        }
+        if matches!(
+            event.event,
+            RuntimeEvent::TurnCompleted { .. }
+                | RuntimeEvent::TurnCancelled
+                | RuntimeEvent::TurnFailed { .. }
+        ) {
+            state.terminal_reported = true;
         }
         match &event.event {
             RuntimeEvent::TurnStarted => {
@@ -715,6 +734,43 @@ mod tests {
         assert!(state.draft.is_empty());
         assert!(state.cancellation.as_ref().unwrap().is_cancelled());
         assert_eq!(wrap_line("a\u{1b}\r\u{7}b", 20), vec!["ab"]);
+    }
+
+    #[test]
+    fn worker_failure_does_not_repeat_a_durable_failure_or_cancellation() {
+        use agent_harness_core::EventId;
+        for event in [
+            RuntimeEvent::TurnFailed {
+                error: "fixture failure".into(),
+            },
+            RuntimeEvent::TurnCancelled,
+        ] {
+            let mut state = UiState::new(ThreadId::new());
+            let (sender, receiver) = mpsc::channel();
+            sender
+                .send(EventEnvelope {
+                    id: EventId::new(),
+                    sequence: 1,
+                    at_unix_ms: 0,
+                    thread_id: state.thread_id.clone(),
+                    turn_id: Some(TurnId::new()),
+                    event,
+                })
+                .unwrap();
+            drain_events(&receiver, &mut state, 100);
+            let count = state.logs.len();
+            finish_turn(Err("fixture failure".into()), &mut state);
+            assert_eq!(state.logs.len(), count);
+        }
+        let mut state = UiState::new(ThreadId::new());
+        finish_turn(Err("failure without a durable event".into()), &mut state);
+        assert!(
+            state
+                .logs
+                .back()
+                .unwrap()
+                .contains("failure without a durable event")
+        );
     }
 
     #[test]

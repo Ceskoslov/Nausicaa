@@ -227,7 +227,9 @@ The TUI takes the **complete endpoint**, so the base URL `https://api.deepseek.c
 needs `/chat/completions` appended. See the
 [DeepSeek validation report](crates/provider-openai/reports/2026-09-12-deepseek.md)
 for observed streaming, cancellation and phase timings. Do not put the key in
-repository configuration or command arguments.
+repository configuration or command arguments. The TUI trims surrounding key
+whitespace, including the CR left by `$(cat ...)` on CRLF files. Interior CR/LF
+remains invalid and is rejected before any HTTP request is sent.
 
 ### TUI options and controls
 

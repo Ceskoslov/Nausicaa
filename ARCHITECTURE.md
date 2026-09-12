@@ -411,3 +411,17 @@ for accepted calls, and receipt-before-cancellation ordering. An actual TUI test
 with a local model fixture and explicit shell approval observed termination 51 ms
 after Ctrl-C and an `Unknown` receipt on both local and Bubblewrap backends. This measurement is not a latency guarantee
 or proof of sandbox containment.
+
+
+TUI environment credentials are normalized at the configuration boundary by
+trimming surrounding whitespace. This accepts LF/CRLF key files loaded through
+shell command substitution, which removes trailing LF but leaves CR. Interior
+CR/LF is preserved for the transport's fail-closed header validation. Provider
+library callers retain their existing explicit configuration behavior. This
+changes no public signatures or durable formats and never logs credential bytes.
+
+When the TUI receives the worker result, it drains previously published runtime
+events again before deciding whether to show a fallback error. A durable failure
+or cancellation is shown once; worker errors without a corresponding terminal
+event still appear. This handles cross-channel delivery order without suppressing
+unpersisted failures or modifying durable events.

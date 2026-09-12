@@ -101,7 +101,9 @@ impl Options {
 
     pub fn provider_config(&self, api_key: Option<String>) -> OpenAiConfig {
         let mut config = OpenAiConfig::new(&self.endpoint, self.model.as_deref().unwrap_or("demo"));
-        config.api_key = api_key;
+        // Shell command substitution removes LF but retains CR from CRLF
+        // files. Normalize only surrounding whitespace, never interior bytes.
+        config.api_key = api_key.map(|key| key.trim().to_owned());
         config.timeout_seconds = self.request_timeout;
         config.extra_body.insert(
             "max_completion_tokens".into(),
@@ -136,6 +138,34 @@ mod tests {
         assert_eq!(options.max_model_iterations, 8);
         assert_eq!(options.history_groups, 20);
     }
+    #[test]
+    fn key_file_line_endings_are_trimmed_without_hiding_interior_newlines() {
+        let options = Options::parse(&args("--demo"), |_| None).unwrap();
+        for input in [
+            "fixture-key",
+            "fixture-key\r",
+            "fixture-key\r\n",
+            "  fixture-key\n",
+        ] {
+            assert_eq!(
+                options
+                    .provider_config(Some(input.into()))
+                    .api_key
+                    .as_deref(),
+                Some("fixture-key")
+            );
+        }
+        for input in ["fixture\rkey", "fixture\nkey"] {
+            assert_eq!(
+                options
+                    .provider_config(Some(input.into()))
+                    .api_key
+                    .as_deref(),
+                Some(input)
+            );
+        }
+    }
+
     #[test]
     fn defaults_are_bounded_and_bad_configuration_fails_before_terminal_or_network() {
         let options = Options::parse(&args("--demo"), |_| None).unwrap();
