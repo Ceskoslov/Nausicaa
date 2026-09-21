@@ -328,10 +328,10 @@ fn finish_turn(result: Result<String, String>, state: &mut UiState) {
     state.running = false;
     state.cancellation = None;
     state.draft.clear();
-    if !state.terminal_reported
-        && let Err(error) = result
-    {
-        state.push_log(format!("turn failed: {error}"));
+    if !state.terminal_reported {
+        if let Err(error) = result {
+            state.push_log(format!("turn failed: {error}"));
+        }
     }
 }
 
@@ -347,20 +347,21 @@ fn cancel(state: &mut UiState) {
 fn drain_progress(progress: &ModelProgressBuffer, state: &mut UiState) -> bool {
     let snapshot = progress.take();
     let mut changed = false;
-    if let Some(event) = snapshot.draft
-        && event.thread_id == state.thread_id
-        && Some(&event.turn_id) == state.current_turn.as_ref()
-        && event.iteration == state.iteration
-        && !state.settled
-        && !state
-            .cancellation
-            .as_ref()
-            .is_some_and(CancellationToken::is_cancelled)
-        && let ModelProgress::TextDelta { text } = event.progress
-    {
-        progress::append_bounded(&mut state.draft, &text);
-        state.phase = "receiving model text";
-        changed = true;
+    if let Some(event) = snapshot.draft.filter(|event| {
+        event.thread_id == state.thread_id
+            && Some(&event.turn_id) == state.current_turn.as_ref()
+            && event.iteration == state.iteration
+            && !state.settled
+            && !state
+                .cancellation
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+    }) {
+        if let ModelProgress::TextDelta { text } = event.progress {
+            progress::append_bounded(&mut state.draft, &text);
+            state.phase = "receiving model text";
+            changed = true;
+        }
     }
     for event in snapshot.completed {
         if event.thread_id != state.thread_id {

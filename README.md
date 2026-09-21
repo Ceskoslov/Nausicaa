@@ -710,7 +710,31 @@ cargo test --workspace --all-features --offline
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --offline
 ```
 
-Remove `--offline` when dependencies are not already cached.
+Remove `--offline` when dependencies are not already cached. CI first runs
+`cargo fetch --locked`, then uses `--locked --offline` for builds and tests.
+
+The minimum supported Rust version is **1.85.0**, tested with the committed lockfile
+on Linux. To reproduce that check:
+
+```sh
+rustup toolchain install 1.85.0 --profile minimal
+cargo +1.85.0 check -p agent-harness --no-default-features --locked --offline
+cargo +1.85.0 test --workspace --all-features --locked --offline
+```
+
+[CI](.github/workflows/ci.yml) configures Rust 1.85.0 and stable tests on Ubuntu
+24.04 and macOS 15, plus formatting, strict Clippy and rustdoc on Linux stable.
+The Linux 1.85.0 and stable commands were verified locally; macOS/hosted workflow
+results require an actual CI run and are not claimed by this local check. Windows
+is outside this initial tested platform matrix.
+
+Default jobs need no live credentials or Bubblewrap. The manual workflow's
+`bubblewrap` input enables a separate Linux lifecycle integration job. It probes
+namespace availability and fails explicitly if the runner cannot provide it;
+it does not disable host security settings or count an unavailable sandbox as a
+passing test. That job runs the existing cancellation integration check, not a
+comprehensive sandbox containment audit. Workflow labels and boolean inputs follow
+[GitHub's workflow syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax).
 
 The core integration tests cover capability restriction, exact-action approval, receipt ordering, abnormal model stops, cancellation, exclusive recovery, durable JSONL replay and torn-tail repair, and hierarchical rules. Optional crates test deterministic compaction, process-group cleanup and bounded output, lease ownership/expiry, and their adapters and state machines. Process tests require Unix process and local IPC facilities; a restricted environment may need an appropriately permitted test runner. Default tests do not require live model credentials.
 
@@ -727,7 +751,7 @@ The core integration tests cover capability restriction, exact-action approval, 
 - The task ledger has recovery semantics but no resident gateway, routing layer, or distributed worker implementation.
 - Parent/child capability intersection is implemented, but a complete subagent/worktree scheduler is not included.
 - Workspace path and symlink validation are defense-in-depth checks, not substitutes for a process sandbox.
-- The manifest's declared Rust minimum is not yet covered by verification or a CI matrix.
+- Rust 1.85.0 is verified locally on Linux; the configured macOS CI matrix still needs hosted execution evidence. Windows is not in the initial matrix.
 
 ## Repository layout
 

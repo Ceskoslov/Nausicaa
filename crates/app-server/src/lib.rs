@@ -233,18 +233,18 @@ impl AppServer {
                 input,
                 cancellation,
             ));
-            if let Ok(mut turns) = turns.lock()
-                && let Some(control) = turns.get_mut(&background_turn_id)
-            {
-                control.state = match result {
-                    Ok(outcome) => TurnRunState::Completed {
-                        content: outcome.content,
-                    },
-                    Err(RuntimeError::Cancelled(_)) => TurnRunState::Cancelled,
-                    Err(error) => TurnRunState::Failed {
-                        error: error.to_string(),
-                    },
-                };
+            if let Ok(mut turns) = turns.lock() {
+                if let Some(control) = turns.get_mut(&background_turn_id) {
+                    control.state = match result {
+                        Ok(outcome) => TurnRunState::Completed {
+                            content: outcome.content,
+                        },
+                        Err(RuntimeError::Cancelled(_)) => TurnRunState::Cancelled,
+                        Err(error) => TurnRunState::Failed {
+                            error: error.to_string(),
+                        },
+                    };
+                }
             }
         });
         Ok(json!({ "thread_id": thread_id, "turn_id": turn_id }))

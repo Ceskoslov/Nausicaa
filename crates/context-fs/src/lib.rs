@@ -200,8 +200,10 @@ impl ContextCompiler for FsContextCompiler {
                 .iter()
                 .map(|message| format!("{message:?}").len())
                 .sum::<usize>();
-        if let Some(maximum) = self.config.max_characters
-            && actual > maximum
+        if let Some(maximum) = self
+            .config
+            .max_characters
+            .filter(|maximum| actual > *maximum)
         {
             return Err(ContextError::TooLarge { actual, maximum });
         }

@@ -1,0 +1,84 @@
+name: Rust checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      bubblewrap:
+        description: Run Linux Bubblewrap integration (requires permitted user namespaces)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Format, Clippy and rustdoc (Linux stable)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - name: Fetch locked dependencies
+        run: cargo +stable fetch --locked
+      - run: cargo +stable fmt --all -- --check
+      - run: cargo +stable clippy --workspace --all-targets --all-features --locked --offline -- -D warnings
+      - run: cargo +stable doc --workspace --all-features --no-deps --locked --offline
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - run: git diff --check
+
+  tests:
+    name: Tests (${{ matrix.os }}, Rust ${{ matrix.toolchain }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+        toolchain: ['1.85.0', stable]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install toolchain
+        run: rustup toolchain install "${{ matrix.toolchain }}" --profile minimal
+      - name: Fetch locked dependencies
+        run: cargo +${{ matrix.toolchain }} fetch --locked
+      - name: Verify minimal facade
+        run: cargo +${{ matrix.toolchain }} check -p agent-harness --no-default-features --locked --offline
+      - name: Protocol and workspace tests (no Bubblewrap or live credentials)
+        run: cargo +${{ matrix.toolchain }} test --workspace --all-features --locked --offline
+
+  bubblewrap:
+    name: Opt-in Bubblewrap integration (Linux)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.bubblewrap }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal
+      - name: Install Bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+      - name: Verify namespace availability
+        run: |
+          if ! bwrap --unshare-all --ro-bind / / -- /bin/true; then
+            echo '::error::Bubblewrap namespaces are unavailable on this runner; integration tests have not run.'
+            exit 1
+          fi
+      - run: cargo +stable fetch --locked
+      - name: Sandbox lifecycle integration
+        run: cargo +stable test -p agent-harness-executor-process --locked --offline bubblewrap_cancellation -- --ignored

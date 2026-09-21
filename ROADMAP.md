@@ -175,14 +175,15 @@ and the provenance of verification evidence.
 
 ## Ordered delivery queue (2026-09-21)
 
-Keep each numbered step independently reviewable. Only the editing slice is
-completed in this update; subsequent entries are planned, not existing APIs.
+Keep each numbered step independently reviewable. Editing and the local
+maintenance gate are complete; hosted CI results remain pending. Subsequent
+entries are planned, not existing APIs.
 
 | Order | Scope and reason | Required evidence before advancing |
 | --- | --- | --- |
 | 1 — completed | Focused editing: the explicit next area after context; enable safe, reviewable coding changes. | Multi-file fixture, stale/ambiguous input rejection, bounded reads/search, unchanged approval and receipt semantics (above). |
-| 2 — next | Maintenance gate: verify/correct Rust 1.85 support and automate format, Clippy, tests and rustdoc on supported hosts before adding transport dependencies. | Actual minimum-toolchain build/test evidence; CI distinguishes protocol checks from opt-in Bubblewrap containment checks. |
-| 3 | Provider/runtime: replace worker-thread transport with true async transport; separately add bounded retry of eligible model failures and cumulative time/token budgets with verification reserve. | Prompt cancellation, incomplete streams never execute calls, retries cannot duplicate effects, retry/budget exhaustion deterministically terminates. Preserve current request/stream compatibility. |
+| 2 — implemented; hosted CI pending | Maintenance gate: verify/correct Rust 1.85 support and automate format, Clippy, tests and rustdoc on supported hosts before adding transport dependencies. | Actual minimum-toolchain build/test evidence; CI distinguishes protocol checks from opt-in Bubblewrap containment checks. |
+| 3 — next | Provider/runtime: replace worker-thread transport with true async transport; separately add bounded retry of eligible model failures and cumulative time/token budgets with verification reserve. | Prompt cancellation, incomplete streams never execute calls, retries cannot duplicate effects, retry/budget exhaustion deterministically terminates. Preserve current request/stream compatibility. |
 | 4 | Persistence: specify ownership and versioned checkpoints/waiting states before implementing safe resumption. | Fault injection at model, approval, execution-start and receipt boundaries; known-safe continuation and explicit unknown outcomes without action replay; documented migration. |
 | 5 | Execution supervision: durable execution identity/status independent of a model worker, building on ownership/reconciliation rules. | Worker restart reconciles running/completed IDs; cleanup and resource limits remain observable; unknown work is not launched again. |
 | 6 | Control plane: reconstruct durable status and expose resume/delivery workflows over the preceding boundaries. | Client reconnect after restart reports correct task/turn/pending action/delivery state, including unknown effects. |
@@ -219,9 +220,16 @@ and artifact versions must make comparisons reproducible.
 
 ## Maintenance work to schedule explicitly
 
-- Verify or correct the declared minimum Rust version, then automate that check.
-- Add CI for the documented checks and a supported-platform matrix; distinguish
-  protocol tests from environment-dependent sandbox integration tests.
+- Implemented (2026-09-21): preserve Rust 1.85.0 by replacing unsupported let
+  chains with equivalent conditionals/filters. The committed dependency lockfile
+  passes all 83 default tests on Linux 1.85.0; one Bubblewrap test remains opt-in.
+  Minimal-facade compilation is checked separately. No API or data-format change.
+- Implemented: [CI](.github/workflows/ci.yml) runs the documented quality checks
+  and configures Linux/macOS with Rust 1.85.0/stable. A manual Bubblewrap lifecycle
+  job first probes namespace availability and reports an environment failure
+  explicitly. Local workflow lint and Linux checks passed; hosted/macOS execution
+  evidence remains pending until the workflow runs. Cancellation integration is
+  not proof of complete sandbox containment.
 - Decide whether to share journal recovery across event, task, and memory stores
   or introduce transactional storage. Define schema migration and ownership first.
 - Extend fault injection to append failures, lifecycle boundaries, and worker

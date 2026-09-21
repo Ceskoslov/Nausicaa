@@ -107,9 +107,7 @@ impl ContextCompiler for LayeredContextCompiler {
             .map(|message| serde_json::to_string(message).map_or(0, |value| value.len()))
             .sum();
         let actual = prompt_size + transcript_size;
-        if let Some(maximum) = self.max_characters
-            && actual > maximum
-        {
+        if let Some(maximum) = self.max_characters.filter(|maximum| actual > *maximum) {
             return Err(ContextError::TooLarge { actual, maximum });
         }
 

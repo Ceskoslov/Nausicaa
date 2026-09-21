@@ -253,8 +253,10 @@ impl JsonlTaskLedger {
     ) -> Result<Submission, LedgerError> {
         let idempotency_key = idempotency_key.into();
         let mut state = self.state.lock().map_err(|_| LedgerError::Poisoned)?;
-        if let Some(task_id) = state.idempotency.get(&idempotency_key)
-            && let Some(task) = state.tasks.get(task_id)
+        if let Some(task) = state
+            .idempotency
+            .get(&idempotency_key)
+            .and_then(|task_id| state.tasks.get(task_id))
         {
             return Ok(Submission {
                 task: task.clone(),

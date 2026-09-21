@@ -463,3 +463,18 @@ Compatibility is additive: no existing public signature or durable event version
 changes. New tool names and canonical JSON fields replay through the existing
 protocol; older binaries can inspect events but do not register the new tools.
 Prepared actions are never interpreted as instructions to resume after restart.
+
+
+## Toolchain and verification boundary
+
+The workspace retains Rust 1.85 as its minimum; unsupported let chains were
+replaced with equivalent filters/conditionals without changing public APIs,
+serialized state, or execution ordering. Linux tests verify the committed lockfile
+with Rust 1.85.0 as well as stable. Dependency updates must preserve that check.
+
+[CI](.github/workflows/ci.yml) separates stable quality checks, a Rust
+1.85.0/stable Linux/macOS test matrix, and manually enabled Linux Bubblewrap
+integration. Missing namespaces are an explicit environment failure, not evidence
+of a passing integration. This workflow does not grant credentials or run live
+models. Hosted/macOS execution remains unverified until CI runs; local protocol
+and lifecycle tests are not a containment certification.

@@ -130,8 +130,10 @@ impl Decoder {
                                 id.as_str().ok_or_else(|| error("invalid stream call id"))?,
                             );
                         }
-                        if let Some(kind) = call.get("type").filter(|v| !v.is_null())
-                            && kind != "function"
+                        if call
+                            .get("type")
+                            .filter(|v| !v.is_null())
+                            .is_some_and(|kind| kind != "function")
                         {
                             return Err(error("unsupported streamed tool type"));
                         }
