@@ -1,8 +1,8 @@
 # Nausicaa development roadmap
 
 Baseline: 2026-09-11, reliability commit `8bb9e1e`. This is a development plan,
-not a list of implemented APIs. Development now continues with the optional
-task-acceptance baseline; later stages remain gated by their acceptance evidence.
+not a list of implemented APIs. Development now continues from the task-acceptance, context and focused editing
+baselines; later stages remain gated by their acceptance evidence.
 
 ## 1. Reliability baseline — completed within the reviewed scope
 
@@ -87,7 +87,7 @@ limit the conclusions; this is provider/harness validation, not broad coding
 quality evidence. General semantic checkers, stronger
 artifact retention, and real model comparisons need their own measured changes.
 
-## 3. Sustained execution — context baseline implemented
+## 3. Sustained execution — context and focused editing baselines implemented
 
 Deliver these as separate reviewable changes, not one large runtime replacement.
 
@@ -119,7 +119,25 @@ retrieval, and denied access. A combined fixture drops old history and externali
 a final-request test-counter budget. This satisfies the Context row at the
 embedding boundary; production model tokenizers, token-driven automatic
 compaction, archive indexing/GC, and cumulative task budgets remain extensions.
-The next ordered implementation area is Editing tools.
+The focused Editing tools slice below is now implemented; the next runtime area
+is Provider/runtime.
+
+**Implemented editing slice (2026-09-21):** optional `register_editing_tools`
+adds `search_files`, `read_file_page`, and `apply_patch` without changing the
+legacy tool registration. Search accepts a bounded list of explicit files;
+pages preserve UTF-8 boundaries and report continuation offsets. A patch requires
+a unique exact old fragment, retains reviewable full before/after snapshots in
+the canonical action, and rejects any content change between preparation and
+execution. The TUI enables readers and requires approval for patches.
+
+Seven deterministic regressions cover a multi-file search/read/edit fixture,
+stale and overlapping input, cancellation, changed symlinks, UTF-8 continuation,
+size/search bounds, and runtime policy/default approval rejection with durable
+execution/receipt ordering. This meets the Editing row for a bounded existing-file
+workflow. It does not establish transactional multi-file edits, recursive search,
+snapshot-consistent pages or safety against concurrent external writers. Write
+errors after the effect boundary remain unknown; no action is automatically
+retried. See [editing boundaries](ARCHITECTURE.md#focused-workspace-editing).
 
 **TUI requests, progress and cancellation:** validated CLI/environment settings now expose the
 model request timeout, completion-token cap, temperature, per-turn iteration
@@ -154,6 +172,26 @@ unknown-effect receipt before turn cancellation.
 Reserve verification time in a task budget rather than spending the entire budget
 on generation. Automatic compaction or resumption must preserve user constraints
 and the provenance of verification evidence.
+
+## Ordered delivery queue (2026-09-21)
+
+Keep each numbered step independently reviewable. Only the editing slice is
+completed in this update; subsequent entries are planned, not existing APIs.
+
+| Order | Scope and reason | Required evidence before advancing |
+| --- | --- | --- |
+| 1 — completed | Focused editing: the explicit next area after context; enable safe, reviewable coding changes. | Multi-file fixture, stale/ambiguous input rejection, bounded reads/search, unchanged approval and receipt semantics (above). |
+| 2 — next | Maintenance gate: verify/correct Rust 1.85 support and automate format, Clippy, tests and rustdoc on supported hosts before adding transport dependencies. | Actual minimum-toolchain build/test evidence; CI distinguishes protocol checks from opt-in Bubblewrap containment checks. |
+| 3 | Provider/runtime: replace worker-thread transport with true async transport; separately add bounded retry of eligible model failures and cumulative time/token budgets with verification reserve. | Prompt cancellation, incomplete streams never execute calls, retries cannot duplicate effects, retry/budget exhaustion deterministically terminates. Preserve current request/stream compatibility. |
+| 4 | Persistence: specify ownership and versioned checkpoints/waiting states before implementing safe resumption. | Fault injection at model, approval, execution-start and receipt boundaries; known-safe continuation and explicit unknown outcomes without action replay; documented migration. |
+| 5 | Execution supervision: durable execution identity/status independent of a model worker, building on ownership/reconciliation rules. | Worker restart reconciles running/completed IDs; cleanup and resource limits remain observable; unknown work is not launched again. |
+| 6 | Control plane: reconstruct durable status and expose resume/delivery workflows over the preceding boundaries. | Client reconnect after restart reports correct task/turn/pending action/delivery state, including unknown effects. |
+| 7 — gated | Measured orchestration/adaptation (stage 4), beginning with independent evaluation. | Named held-out success/false-completion/cost evidence before adding concurrency, dynamic tools or adaptive profiles. |
+
+Cross-cutting fault injection accompanies each owning change. Journal recovery
+sharing, transactional storage, trace retention and memory-growth work remain
+explicit design items below; this queue does not silently introduce a universal
+store or scheduler.
 
 ## 4. Measured orchestration and adaptation — exploratory
 

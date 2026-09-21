@@ -12,7 +12,8 @@ use agent_harness_core::{
     RuntimeConfig, ToolRegistry,
 };
 use agent_harness_executor_process::{
-    BubblewrapRunner, LocalProcessRunner, ProcessRunner, register_workspace_tools,
+    BubblewrapRunner, LocalProcessRunner, ProcessRunner, register_editing_tools,
+    register_workspace_tools,
 };
 use agent_harness_provider_openai::{CurlTransport, OpenAiCompatibleAdapter};
 use agent_harness_tui::{ModelProgressBuffer, TuiConfig, approval_channel, event_channel};
@@ -79,6 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arc::new(BubblewrapRunner::new(&workspace, 1_048_576)?)
         };
         register_workspace_tools(&mut tools, &workspace, runner)?;
+        register_editing_tools(&mut tools, &workspace)?;
     }
 
     let mut context_config = FsContextConfig::new(&workspace, &workspace);
@@ -106,6 +108,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?);
     let policy = CapabilityPolicy::deny_by_default()
         .grant("read_file", Access::Allow)
+        .grant("read_file_page", Access::Allow)
+        .grant("search_files", Access::Allow)
+        .grant("apply_patch", Access::Ask)
         .grant("write_file", Access::Ask)
         .grant("shell", Access::Ask);
     let runtime = Arc::new(

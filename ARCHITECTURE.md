@@ -425,3 +425,41 @@ events again before deciding whether to show a fallback error. A durable failure
 or cancellation is shown once; worker errors without a corresponding terminal
 event still appear. This handles cross-channel delivery order without suppressing
 unpersisted failures or modifying durable events.
+
+
+## Focused workspace editing
+
+The optional [editing tools](crates/executor-process/src/editing.rs) belong to
+`executor-process`, with separate `register_editing_tools` registration. The
+facade's default features and the legacy workspace registration are unchanged.
+The TUI explicitly enables the readers and uses `Ask` for patches. Core policy,
+exact-action approval, execution-start and durable receipt ordering are reused.
+
+`read_file_page` returns bounded UTF-8 byte pages with continuation offsets;
+`search_files` searches a bounded explicit list of files with literal matching
+and reports truncation. Neither performs recursive discovery. Both read current
+workspace content at execution, recheck canonical paths, and remain read-only.
+Limits are 1 MiB per file, 16 KiB per page, 32 search paths and 100 matching lines
+with 200-character excerpts. These bound retention/work per call, not OS I/O time.
+
+`apply_patch` requires one unique exact fragment, including overlap detection.
+Preparation retains full before/after snapshots and old/new fragments in the
+canonical action, making approval and logs inspectable. Execution rechecks the
+path, opens without truncation, compares the complete file with the prepared
+snapshot, then writes the prepared result, truncates to its length and syncs.
+Stale or ambiguous text fails without a write. Cancellation before the effect
+boundary does not write; I/O errors after that boundary become `OutcomeUnknown`.
+No automatic retry or rollback is introduced.
+
+The trusted host must coordinate concurrent workspace writers. The comparison
+and write are not atomic against other processes; path checks do not eliminate
+filesystem races or provide sandbox isolation. Patches preserve the file inode
+and consequently affect its hard links. Multi-file edits are separately approved
+calls, not a transaction, and a crash during an in-place write can leave partial
+content. Full snapshots also increase event/approval sizes. Paging has no snapshot
+identity across calls. These are explicit limits of this narrow editing baseline.
+
+Compatibility is additive: no existing public signature or durable event version
+changes. New tool names and canonical JSON fields replay through the existing
+protocol; older binaries can inspect events but do not register the new tools.
+Prepared actions are never interpreted as instructions to resume after restart.

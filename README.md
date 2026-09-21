@@ -439,6 +439,40 @@ groups; there is no automatic archive search/index or garbage collection.
 - Uses a 1 MiB default content limit, truncates or creates the file, and calls `sync_data`.
 - Produces a workspace-write, idempotent canonical action.
 
+### Optional editing tools
+
+`register_editing_tools(&mut tools, &workspace)` adds three tools separately from
+`register_workspace_tools`. Embedders must explicitly grant their tool names;
+registration alone grants no access. The TUI registers both sets unless
+`--no-tools` is set, permits the two readers, and asks approval for `apply_patch`.
+
+| Tool | Arguments | Behavior |
+| --- | --- | --- |
+| `read_file_page` | `path`, optional byte `offset` (default 0), `limit` (default 4096; 4–16384) | Returns UTF-8 `content`, `total_bytes`, and nullable `next_offset`; follow that offset to avoid splitting characters. |
+| `search_files` | `paths` (1–32 explicit relative files), `query` (nonempty single-line literal, at most 1024 bytes) | Case-sensitive search; returns up to 100 matching lines with relative path, one-based line, zero-based byte offset and an excerpt of at most 200 characters, plus `truncated`. |
+| `apply_patch` | `path`, `old_text`, `new_text` | Replaces exactly one occurrence in an existing file; empty, missing or ambiguous old text fails, including overlapping matches. |
+
+All three accept UTF-8 regular files up to 1 MiB and revalidate prepared paths at
+execution. Pages are live reads, not retained snapshots; concurrent changes can
+invalidate a continuation. Search does not recurse or interpret regexes. Use the
+returned byte offset with `read_file_page` for more context.
+
+For example, `apply_patch` arguments
+`{"path":"src/lib.rs","old_text":"return 1;","new_text":"return 2;"}`
+prepare an action containing the canonical path, exact old/new fragments and full
+`before`/`after` snapshots for review. Execution compares the entire file with
+`before`, then writes only the prepared `after`. A changed file requires a new
+call and approval. The resulting file is also limited to 1 MiB. Patches are marked
+unsafe to retry; a write, truncate or sync error returns an unknown outcome.
+
+This is optimistic conflict detection, not a filesystem transaction. Hosts must
+serialize other writers; changes between the final comparison and write cannot
+be excluded. Each call changes one file in place (including other hard links to
+that inode); multi-file work uses separate calls and receipts, without rollback.
+A crash may leave a partial write. Existing `write_file` behavior and registration
+are unchanged. There are no event-format migrations; replay preserves the new
+canonical arguments as ordinary JSON and never re-executes them automatically.
+
 ### `shell`
 
 - Runs `/bin/sh -lc <command>` in the workspace.

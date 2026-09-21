@@ -3,6 +3,9 @@
 //! `BubblewrapRunner` provides an OS boundary on Linux. `LocalProcessRunner`
 //! and workspace path checks are explicitly not sandboxes.
 
+mod editing;
+pub use editing::{ApplyPatchTool, ReadFilePageTool, SearchFilesTool, register_editing_tools};
+
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -956,7 +959,7 @@ mod tests {
         }
     }
 
-    fn context(workspace: &Path) -> ToolExecutionContext {
+    pub(crate) fn context(workspace: &Path) -> ToolExecutionContext {
         ToolExecutionContext {
             thread_id: ThreadId::new(),
             turn_id: TurnId::new(),
@@ -966,7 +969,7 @@ mod tests {
         }
     }
 
-    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    pub(crate) fn block_on<F: std::future::Future>(future: F) -> F::Output {
         use std::task::{Context, Poll, Waker};
         let mut future = std::pin::pin!(future);
         let mut context = Context::from_waker(Waker::noop());
