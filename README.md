@@ -351,7 +351,7 @@ let outcome = runtime.run_turn(&thread_id, "Do the work").await?;
 println!("{}", outcome.content);
 ```
 
-The core does not select an async runtime. Its public model, approval, executor, and tool boundaries return `BoxFuture`, allowing the embedding application to choose its own executor. The included provider runs supervised curl requests on worker threads and wakes its future; process runners still block internally but check a cancellation token signalled from another thread.
+The core does not select an async runtime. Its public model, approval, executor, and tool boundaries return `BoxFuture`, allowing the embedding application to choose its own executor. The default provider path runs supervised curl requests on worker threads and wakes its future; an optional native reqwest transport runs on the host's Tokio runtime. Process runners still block internally but check a cancellation token signalled from another thread.
 
 ### Implementing a tool
 
@@ -683,7 +683,7 @@ register tools and grant access through the runtime instead. When no projected
 tools remain, `tool_choice` is removed too. This closes a model-visibility gap for
 empty projections; execution policy checks remain in force.
 
-The adapter runs curl on a worker thread. Opt into SSE with
+The default adapter path runs curl on a worker thread. Opt into SSE with
 `.with_streaming(true)` and attach a `ModelProgressObserver` using
 `AgentRuntime::with_model_observer`. Text deltas are unvalidated previews; only a
 complete HTTP response with a finish reason and `[DONE]` becomes a model response.
@@ -698,6 +698,55 @@ Request diagnostics expose DNS, TCP and TLS durations, first-byte and first-text
 elapsed times, and total host elapsed time. First byte includes headers/keepalives;
 it is not first model text or a measurement of upstream queue time. Missing timings
 are unknown, especially on cancellation or transport failure.
+
+### Native asynchronous transport
+
+Enable provider feature `reqwest-transport`, or facade feature `provider-reqwest`,
+then use `OpenAiCompatibleAdapter::new_async(config, Arc::new(ReqwestTransport::new()?))`.
+This uses reqwest/Rustls without a per-request blocking worker or curl process.
+The host must poll it on a Tokio runtime with I/O and time enabled, for example
+`tokio::runtime::Builder::new_current_thread().enable_all().build()?`.
+`ReqwestTransport`'s rustdoc includes a complete compilable example. The core
+remains runtime-independent; other native implementations can implement
+`AsyncHttpTransport` without enabling reqwest.
+
+The constructor reuses the same model mapping, policy-projected tool schemas,
+final request budget and `.with_streaming(true)` option. The TUI and existing
+`new(config, transport)` callers continue using their configured blocking transport;
+`full` does not implicitly choose a native runtime or change the TUI backend.
+Facade defaults still enable no optional features.
+
+Native requests enforce the configured deadline (zero retains the curl path's
+one-second minimum), poll cancellation every 10 ms while waiting for network I/O,
+and drop the in-flight response on cancellation or future abandonment. Polling
+and timeout responsiveness depend on the host driving Tokio and returning from
+observers promptly. Normal completion requires the entire HTTP body and, for
+SSE, a finish reason and `[DONE]`; partial tool calls never enter the transcript.
+Response retention is capped at 8 MiB and SSE frames retain their 1 MiB limit.
+
+Redirects, client retries and idle connection pooling are disabled. This makes
+request ownership explicit; it does not cancel remote generation or refund
+provider usage. DNS resolution may still use Tokio's resolver facilities; this
+is async HTTP I/O, not a guarantee that every library operation is thread-free.
+HTTPS uses Rustls with WebPKI roots. Custom roots, client injection, proxy controls
+and native TUI selection are outside this slice.
+
+Diagnostics retain total and first-text elapsed time. DNS/TCP/TLS and the exact
+first wire-byte time are unavailable and remain `None`; an abandoned future
+reports cancellation with total time and unknown phases. Protocol errors and
+cancellation are nonretryable; I/O errors and HTTP 429/5xx are marked retryable,
+but no automatic retry policy is implemented. HTTP error excerpts are bounded;
+request URLs are removed from reqwest I/O errors. These are diagnostic changes,
+not durable event/schema migrations. Existing APIs and serialized history remain
+compatible.
+
+The lockfile retains `idna_adapter` 1.2.0 and compatible ICU dependencies because
+a newer transitive `yoke-derive` release failed the actual Rust 1.85 build despite
+compatible metadata. Revalidate the minimum toolchain when updating dependencies.
+Local HTTP tests cover successful JSON/SSE, cancellation before headers and during
+streaming, future abandonment, incomplete tool streams, deadlines, status handling,
+response limits, header validation and final request budgets; live TLS/model
+quality and hosted macOS results are not established by these fixtures.
 
 ## Development and verification
 
@@ -741,7 +790,7 @@ The core integration tests cover capability restriction, exact-action approval, 
 ## Current limitations
 
 - Normal turn completion is not independent task acceptance. The optional task layer checks exact artifact contents supplied by a trusted host; it is not a general code evaluator or automatic scheduler. The paired offline evaluation runner measures this narrow baseline.
-- The included provider supports Chat Completions, with optional SSE. It uses worker threads, not a native async HTTP client; the core does not automatically retry `ModelError` values marked retryable.
+- The included provider supports Chat Completions and optional SSE over curl or optional native reqwest/Tokio. The core does not automatically retry `ModelError` values marked retryable; cumulative task time/token budgets remain planned.
 - Deterministic compaction drops complete old message groups and records the count; it does not generate a semantic summary. The character cap is an approximate byte-size check. Optional final provider-request budgeting requires a trusted model-specific token counter; optional output externalization retains original durable receipts and requires explicitly authorized retrieval.
 - JSONL stores provide synchronized append and `sync_data` durability within one process, not cross-process distributed locking.
 - Only the core event store repairs incomplete final JSONL records; the memory and task-ledger stores still reject malformed tails.

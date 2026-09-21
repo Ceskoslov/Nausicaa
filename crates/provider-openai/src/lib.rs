@@ -15,6 +15,12 @@ use agent_harness_core::{
 use serde_json::{Map, Value, json};
 use thiserror::Error;
 
+mod asynchronous;
+#[cfg(feature = "reqwest-transport")]
+mod native;
+#[cfg(feature = "reqwest-transport")]
+pub use native::ReqwestTransport;
+
 mod stream;
 mod transport;
 mod worker;
@@ -67,7 +73,27 @@ pub trait HttpTransport: Send + Sync {
     }
 }
 
-/// Request-local cancellation also fires when its model future is dropped.
+/// Native asynchronous transport. The returned future owns in-flight I/O;
+/// dropping it must stop that request. Implementations choose their own runtime.
+/// Text callbacks are advisory previews, never partial executable tool calls.
+pub trait AsyncHttpTransport: Send + Sync {
+    fn post_json_controlled<'a>(
+        &'a self,
+        request: HttpRequest,
+        control: &'a HttpControl,
+        on_text: &'a mut (dyn FnMut(String) + Send),
+        timings: &'a mut RequestTimings,
+    ) -> BoxFuture<'a, Result<HttpResponse, TransportError>>;
+}
+
+#[derive(Clone)]
+enum Transport {
+    Blocking(Arc<dyn HttpTransport>),
+    Async(Arc<dyn AsyncHttpTransport>),
+}
+
+/// Request-local cancellation. Blocking workers also observe abandonment when
+/// their model future is dropped; native transport futures own and drop their I/O.
 #[derive(Clone, Default)]
 pub struct HttpControl {
     cancellation: CancellationToken,
@@ -141,7 +167,7 @@ impl OpenAiConfig {
 pub struct OpenAiCompatibleAdapter {
     streaming: bool,
     config: OpenAiConfig,
-    transport: Arc<dyn HttpTransport>,
+    transport: Transport,
     request_budget: Option<(RequestBudget, Arc<dyn RequestTokenCounter>)>,
 }
 
@@ -166,7 +192,19 @@ impl OpenAiCompatibleAdapter {
     pub fn new(config: OpenAiConfig, transport: Arc<dyn HttpTransport>) -> Self {
         Self {
             config,
-            transport,
+            transport: Transport::Blocking(transport),
+            request_budget: None,
+            streaming: false,
+        }
+    }
+
+    /// Use native async I/O without a per-request blocking worker. The host
+    /// must drive the runtime required by the selected transport.
+    #[must_use]
+    pub fn new_async(config: OpenAiConfig, transport: Arc<dyn AsyncHttpTransport>) -> Self {
+        Self {
+            config,
+            transport: Transport::Async(transport),
             request_budget: None,
             streaming: false,
         }
@@ -276,13 +314,7 @@ impl OpenAiCompatibleAdapter {
         Ok(Value::Object(body))
     }
 
-    fn complete_blocking(
-        &self,
-        request: &ModelRequest,
-        control: &HttpControl,
-        on_text: &mut dyn FnMut(String),
-        timings: &mut RequestTimings,
-    ) -> Result<ModelResponse, ModelError> {
+    fn http_request(&self, request: &ModelRequest) -> Result<HttpRequest, ModelError> {
         let mut body = self.request_body(request)?;
         body.as_object_mut()
             .expect("request object")
@@ -335,19 +367,29 @@ impl OpenAiCompatibleAdapter {
         if let Some(organization) = &self.config.organization {
             headers.insert("OpenAI-Organization".to_owned(), organization.clone());
         }
-        let response = self
-            .transport
-            .post_json_controlled(
-                HttpRequest {
-                    url: self.config.endpoint.clone(),
-                    headers,
-                    body,
-                    timeout_seconds: self.config.timeout_seconds,
-                },
-                control,
-                on_text,
-                timings,
-            )
+        Ok(HttpRequest {
+            url: self.config.endpoint.clone(),
+            headers,
+            body,
+            timeout_seconds: self.config.timeout_seconds,
+        })
+    }
+
+    fn complete_blocking(
+        &self,
+        request: &ModelRequest,
+        control: &HttpControl,
+        on_text: &mut dyn FnMut(String),
+        timings: &mut RequestTimings,
+    ) -> Result<ModelResponse, ModelError> {
+        let Transport::Blocking(transport) = &self.transport else {
+            return Err(ModelError::new(
+                "async transport cannot run on blocking worker",
+                false,
+            ));
+        };
+        let response = transport
+            .post_json_controlled(self.http_request(request)?, control, on_text, timings)
             .map_err(|error| ModelError::new(error.to_string(), true))?;
         parse_response(response.body)
     }
@@ -367,7 +409,14 @@ impl ModelAdapter for OpenAiCompatibleAdapter {
         control: ModelControl,
     ) -> BoxFuture<'a, Result<ModelResponse, ModelError>> {
         let adapter = self.clone();
-        Box::pin(async move { worker::start(adapter, request, control).await })
+        Box::pin(async move {
+            match &adapter.transport {
+                Transport::Blocking(_) => worker::start(adapter, request, control).await,
+                Transport::Async(transport) => {
+                    asynchronous::complete(&adapter, transport.as_ref(), request, control).await
+                }
+            }
+        })
     }
 }
 

@@ -145,7 +145,7 @@ limit, and retained transcript groups. The provider and TUI now support bounded 
 version-1 metrics file, and cancellation of in-flight curl requests. Local HTTP
 tests cover previews before completion, cancellation closing the connection and
 missing stream terminators; UI tests cover stale previews and metric privacy.
-Native async HTTP and automatic retry remain proposed. Built-in shell cancellation
+Native async HTTP is now available as the opt-in slice below; automatic retry remains proposed. Built-in shell cancellation
 is now wired through `run_controlled`: bounded polling, Unix group cleanup and
 unknown-effect receipts are tested. Custom runner interruption remains the
 implementer’s responsibility.
@@ -173,17 +173,37 @@ Reserve verification time in a task budget rather than spending the entire budge
 on generation. Automatic compaction or resumption must preserve user constraints
 and the provenance of verification evidence.
 
+**Native async transport slice (2026-09-21):** additive `AsyncHttpTransport` and
+`new_async` reuse final request accounting and complete-response validation.
+Optional `ReqwestTransport` uses reqwest/Rustls on the host's Tokio runtime,
+without a per-request worker. Cancellation, deadlines and dropping the future
+release local in-flight I/O; automatic redirects/retries and idle pooling are
+disabled. Bounded local HTTP fixtures cover JSON/SSE, pre-header and streamed
+cancellation, abandonment, incomplete tool calls, HTTP statuses, timeout, limits,
+invalid headers, missing runtime and budget rejection. The existing curl/TUI path
+and core's runtime independence are preserved.
+
+This completes the native transport slice only. Automatic retries, cumulative
+time/token budgets and verification reserve remain acceptance work for the
+Provider/runtime row. Native diagnostics cannot measure DNS/TCP/TLS/first-wire-byte
+phases; TLS/live model and hosted platform validation need separate evidence.
+The committed lockfile retains Rust 1.85-compatible transitive dependencies.
+Validation: Linux Rust 1.85.0 and stable each pass 87 unit/integration tests plus
+one compile-only documentation example; one Bubblewrap test is explicitly ignored.
+Strict workspace Clippy, rustfmt, rustdoc and diff checks pass. The minimal facade
+still has no Tokio/reqwest dependency. Hosted/macOS and live TLS runs remain pending.
+
 ## Ordered delivery queue (2026-09-21)
 
 Keep each numbered step independently reviewable. Editing and the local
 maintenance gate are complete; hosted CI results remain pending. Subsequent
-entries are planned, not existing APIs.
+entries remain gated; native async transport is the implemented first slice of step 3.
 
 | Order | Scope and reason | Required evidence before advancing |
 | --- | --- | --- |
 | 1 — completed | Focused editing: the explicit next area after context; enable safe, reviewable coding changes. | Multi-file fixture, stale/ambiguous input rejection, bounded reads/search, unchanged approval and receipt semantics (above). |
 | 2 — implemented; hosted CI pending | Maintenance gate: verify/correct Rust 1.85 support and automate format, Clippy, tests and rustdoc on supported hosts before adding transport dependencies. | Actual minimum-toolchain build/test evidence; CI distinguishes protocol checks from opt-in Bubblewrap containment checks. |
-| 3 — next | Provider/runtime: replace worker-thread transport with true async transport; separately add bounded retry of eligible model failures and cumulative time/token budgets with verification reserve. | Prompt cancellation, incomplete streams never execute calls, retries cannot duplicate effects, retry/budget exhaustion deterministically terminates. Preserve current request/stream compatibility. |
+| 3 — native transport implemented; retries/budgets next | Provider/runtime: opt-in native async transport now complements the worker-thread path; separately add bounded retry of eligible model failures and cumulative time/token budgets with verification reserve. | Prompt cancellation, incomplete streams never execute calls, retries cannot duplicate effects, retry/budget exhaustion deterministically terminates. Preserve current request/stream compatibility. |
 | 4 | Persistence: specify ownership and versioned checkpoints/waiting states before implementing safe resumption. | Fault injection at model, approval, execution-start and receipt boundaries; known-safe continuation and explicit unknown outcomes without action replay; documented migration. |
 | 5 | Execution supervision: durable execution identity/status independent of a model worker, building on ownership/reconciliation rules. | Worker restart reconciles running/completed IDs; cleanup and resource limits remain observable; unknown work is not launched again. |
 | 6 | Control plane: reconstruct durable status and expose resume/delivery workflows over the preceding boundaries. | Client reconnect after restart reports correct task/turn/pending action/delivery state, including unknown effects. |
@@ -222,7 +242,7 @@ and artifact versions must make comparisons reproducible.
 
 - Implemented (2026-09-21): preserve Rust 1.85.0 by replacing unsupported let
   chains with equivalent conditionals/filters. The committed dependency lockfile
-  passes all 83 default tests on Linux 1.85.0; one Bubblewrap test remains opt-in.
+  passes all 78 default tests on Linux 1.85.0; one Bubblewrap test remains opt-in.
   Minimal-facade compilation is checked separately. No API or data-format change.
 - Implemented: [CI](.github/workflows/ci.yml) runs the documented quality checks
   and configures Linux/macOS with Rust 1.85.0/stable. A manual Bubblewrap lifecycle

@@ -6,11 +6,19 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+reqwest-transport = ["dep:reqwest", "dep:tokio"]
+
 [dependencies]
 agent-harness-core.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"], optional = true }
+tokio = { version = "1.48", features = ["rt", "time", "macros"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1.48", features = ["rt", "time", "net", "io-util", "sync", "macros"] }

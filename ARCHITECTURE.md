@@ -30,7 +30,7 @@ flowchart TD
 | `context-fs` | Hierarchical rules, skill index/selection, complete-group transcript window, optional output archive and paginated retrieval | Semantic summarization or model tokenization |
 | `memory` | Advisory records, lexical recall, bounded per-turn recall cache | Authorization or a durable task plan |
 | `executor-process` | File tools, shell preparation, local and Bubblewrap process runners | Distributed execution or universal process containment |
-| `provider-openai` | Chat Completions mapping and replaceable HTTP transport | Streaming, runtime retry policy, task completion |
+| `provider-openai` | Chat Completions/SSE mapping and replaceable blocking or native async HTTP transport | Runtime retry policy, task completion |
 | `eval` | Paired isolated task fixtures, evidence and metrics; opt-in live runs | General semantic code verification or production scheduling |
 | `task` | Immutable task criteria, deterministic acceptance, attempt budgets, retained evidence and task journal | Tool authority, worker scheduling, automatic resumption |
 | `task-ledger` | Idempotent submission, claims, leases, terminal results, delivery acknowledgement | A running worker service or automatic task retries |
@@ -98,7 +98,7 @@ mount isolation. Its configured network and bind policy remain separate from
 process cleanup. The non-Unix fallback has bounded reader joining but does not
 provide the Unix group-cleanup guarantee.
 
-The provider future waits for a worker-thread wakeup. Its supervised curl child
+The default provider future waits for a worker-thread wakeup. Its supervised curl child
 checks cancellation and deadlines while draining bounded output. On Unix cancellation
 kills its process group and arranges reaping; other platforms kill the direct child.
 Built-in shell runners check cancellation during their synchronous capture loop;
@@ -478,3 +478,41 @@ integration. Missing namespaces are an explicit environment failure, not evidenc
 of a passing integration. This workflow does not grant credentials or run live
 models. Hosted/macOS execution remains unverified until CI runs; local protocol
 and lifecycle tests are not a containment certification.
+
+
+## Native asynchronous provider transport
+
+`AsyncHttpTransport` and `OpenAiCompatibleAdapter::new_async` are additive provider
+APIs. Blocking `HttpTransport` implementations retain their worker path. Both
+paths share final request construction, token-budget validation, response mapping
+and the same bounded SSE decoder. The core acquires no Tokio/provider dependency.
+
+Provider feature `reqwest-transport` (facade `provider-reqwest`) adds
+`ReqwestTransport`, using reqwest/Rustls on a host-driven Tokio runtime. No worker
+thread is allocated per request by the adapter; the future owns network I/O and
+is dropped on cancellation, deadline or abandonment. The host must enable Tokio
+I/O/time and avoid blocking its executor. An absent runtime returns a protocol
+error; a misconfigured runtime without I/O/time violates the transport contract.
+Core's atomic cancellation token is observed with a 10 ms async timer, without
+changing core scheduling or adding a runtime-specific cancellation primitive.
+
+Client redirects, retries and idle pooling are disabled. Entire responses are
+bounded to 8 MiB, with existing per-frame SSE bounds; successful streams still
+need normal HTTP completion, finish reason and `[DONE]`. Text callbacks remain
+advisory. A dropped future emits settled cancellation diagnostics without cancelling
+other requests sharing the parent token. This does not stop remote computation
+or prove its billing outcome. DNS lookup can use Tokio's resolver facilities.
+
+First-text and total times are measured; unavailable DNS/TCP/TLS/first-byte
+measurements remain unknown. On abandonment, only total time is retained. Native
+protocol/cancellation errors are nonretryable, HTTP 429/5xx and I/O failures are
+eligible flags only; no runtime retry loop exists. Existing blocking error
+classification is unchanged. Reqwest I/O errors omit URLs; HTTP error body excerpts
+are bounded to 4096 characters but remain provider-controlled content.
+
+The feature and canonical protocol are additive, with no event-format migration,
+new durable retry state, automatic recovery or native TUI runtime selection.
+Tests run against bounded local servers on a single-thread Tokio executor and
+retain existing default-transport regression coverage. The committed dependency
+lockfile is tested on Rust 1.85; it holds `idna_adapter` at 1.2.0 to avoid a
+transitive derive release that actually required newer Rust despite its metadata.
