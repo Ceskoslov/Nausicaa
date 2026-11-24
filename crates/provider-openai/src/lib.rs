@@ -388,8 +388,17 @@ impl OpenAiCompatibleAdapter {
                 ));
             }
             if let Some(task_budget) = &self.task_budget {
+                let choices = match body.get("n") {
+                    None => 1,
+                    Some(value) => value.as_u64().filter(|&n| n > 0).ok_or_else(|| {
+                        ModelError::new("task token budget requires a positive choice count", false)
+                    })?,
+                };
+                let total_output_cap = output_cap.checked_mul(choices).ok_or_else(|| {
+                    ModelError::new("task generation token budget exhausted", false)
+                })?;
                 task_budget
-                    .charge_request(input, output_cap)
+                    .charge_request(input, total_output_cap)
                     .map_err(|error| ModelError::new(error.to_string(), false))?;
             }
         }
@@ -817,9 +826,10 @@ mod tests {
             }
         }
         use std::time::Duration;
-        let budget = TaskBudget::new(Duration::from_secs(60), Duration::from_secs(10), 12).unwrap();
+        let budget = TaskBudget::new(Duration::from_secs(60), Duration::from_secs(10), 16).unwrap();
         let mut config = OpenAiConfig::new("http://example.invalid", "test");
         config.extra_body.insert("max_tokens".into(), json!(2));
+        config.extra_body.insert("n".into(), json!(2));
         let adapter = OpenAiCompatibleAdapter::new(config, Arc::new(FailingTransport))
             .with_request_budget(
                 RequestBudget {
@@ -831,7 +841,7 @@ mod tests {
             .unwrap()
             .with_task_budget(budget.clone())
             .unwrap();
-        for remaining in [6, 0] {
+        for remaining in [8, 0] {
             assert!(block_on(adapter.complete(budget_request())).is_err());
             assert_eq!(budget.remaining_tokens(), remaining);
         }
