@@ -137,10 +137,24 @@ impl EventStore for MemoryEventStore {
 
 #[derive(Debug)]
 struct JsonlState {
-    file: File,
+    log: JsonlFile,
     next_sequence: u64,
     events: Vec<EventEnvelope>,
     write_failed: bool,
+}
+
+#[derive(Debug)]
+struct JsonlFile {
+    file: File,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Drop for JsonlFile {
+    fn drop(&mut self) {
+        // A concurrent spawn may briefly inherit the descriptor before exec.
+        // Release ownership explicitly instead of waiting for its last close.
+        let _ = flock(&self.file, libc::LOCK_UN);
+    }
 }
 
 /// Append-only JSONL store. Each successful append is flushed and `sync_data`'d
@@ -156,17 +170,25 @@ pub struct JsonlEventStore {
 impl JsonlEventStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref().to_path_buf();
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .create(true)
             .read(true)
             .append(true)
             .open(&path)
             .map_err(io_error)?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        lock_log(&file, &path)?;
+        flock(&file, libc::LOCK_EX | libc::LOCK_NB).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                StoreError::Locked(path.clone())
+            } else {
+                io_error(error)
+            }
+        })?;
 
+        let mut log = JsonlFile { file };
+        let file = &mut log.file;
         let mut events = Vec::new();
-        let mut reader = BufReader::new(&file);
+        let mut reader = BufReader::new(&*file);
         let mut line = Vec::new();
         let mut line_number = 0;
         let mut valid_bytes = 0_u64;
@@ -247,7 +269,7 @@ impl JsonlEventStore {
             path,
             recovered_tail,
             state: Mutex::new(JsonlState {
-                file,
+                log,
                 next_sequence,
                 events,
                 write_failed: false,
@@ -289,10 +311,11 @@ impl EventStore for JsonlEventStore {
             .map_err(|error| StoreError::Serialization(error.to_string()))?;
         // Any I/O failure may leave a partial record. Do not append behind it.
         state.write_failed = true;
-        state.file.write_all(&encoded).map_err(io_error)?;
-        state.file.write_all(b"\n").map_err(io_error)?;
-        state.file.flush().map_err(io_error)?;
-        state.file.sync_data().map_err(io_error)?;
+        let file = &mut state.log.file;
+        file.write_all(&encoded).map_err(io_error)?;
+        file.write_all(b"\n").map_err(io_error)?;
+        file.flush().map_err(io_error)?;
+        file.sync_data().map_err(io_error)?;
         state.write_failed = false;
         state.next_sequence += 1;
         state.events.push(envelope.clone());
@@ -311,22 +334,18 @@ impl EventStore for JsonlEventStore {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn lock_log(file: &File, path: &Path) -> Result<(), StoreError> {
+fn flock(file: &File, operation: libc::c_int) -> std::io::Result<()> {
     use std::io::ErrorKind;
     use std::os::fd::AsRawFd;
 
     loop {
-        // The descriptor belongs to the live file, which retains ownership
-        // through replay, repair and all subsequent append operations.
-        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if result == 0 {
+        // SAFETY: the live file owns the descriptor for the duration of flock.
+        if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
             return Ok(());
         }
         let error = std::io::Error::last_os_error();
-        match error.kind() {
-            ErrorKind::Interrupted => continue,
-            ErrorKind::WouldBlock => return Err(StoreError::Locked(path.to_path_buf())),
-            _ => return Err(io_error(error)),
+        if error.kind() != ErrorKind::Interrupted {
+            return Err(error);
         }
     }
 }
