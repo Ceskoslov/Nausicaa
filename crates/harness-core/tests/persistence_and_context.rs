@@ -144,3 +144,49 @@ fn directory_rules_load_root_to_leaf_with_override_precedence() {
     assert_eq!(segments[2].text, "api rules");
     fs::remove_dir_all(root).unwrap();
 }
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn event_log_lock_is_held_across_processes_until_close() {
+    use agent_harness_core::StoreError;
+    const LOG_ENV: &str = "NAUSICAA_TEST_LOCKED_EVENT_LOG";
+    const EXPECT_ENV: &str = "NAUSICAA_TEST_EVENT_LOG_LOCK_EXPECTED";
+    if let Some(path) = std::env::var_os(LOG_ENV) {
+        let opened = JsonlEventStore::open(path);
+        if std::env::var_os(EXPECT_ENV).as_deref() == Some(std::ffi::OsStr::new("locked")) {
+            assert!(matches!(opened, Err(StoreError::Locked(_))));
+        } else {
+            assert!(opened.is_ok());
+        }
+        return;
+    }
+
+    let directory = test_directory("locked-log");
+    fs::create_dir(&directory).unwrap();
+    let path = directory.join("events.jsonl");
+    let store = JsonlEventStore::open(&path).unwrap();
+    let probe = |expected| {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "event_log_lock_is_held_across_processes_until_close",
+            ])
+            .env(LOG_ENV, &path)
+            .env(EXPECT_ENV, expected)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    };
+    assert!(matches!(
+        JsonlEventStore::open(&path),
+        Err(StoreError::Locked(_))
+    ));
+    probe("locked");
+    drop(store);
+    probe("available");
+    fs::remove_dir_all(directory).unwrap();
+}

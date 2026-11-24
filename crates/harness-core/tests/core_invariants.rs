@@ -536,9 +536,17 @@ impl ModelAdapter for PendingModel {
 
 #[test]
 fn recovery_rejects_active_turn_and_recovers_after_future_is_dropped() {
+    let store = Arc::new(MemoryEventStore::new());
     let runtime = AgentRuntime::new(
         Arc::new(PendingModel),
-        Arc::new(MemoryEventStore::new()),
+        store.clone(),
+        Arc::new(LayeredContextCompiler::new()),
+        ToolRegistry::new(),
+        Arc::new(CapabilityPolicy::deny_by_default()),
+    );
+    let another_runtime = AgentRuntime::new(
+        Arc::new(PendingModel),
+        store,
         Arc::new(LayeredContextCompiler::new()),
         ToolRegistry::new(),
         Arc::new(CapabilityPolicy::deny_by_default()),
@@ -551,6 +559,14 @@ fn recovery_rejects_active_turn_and_recovers_after_future_is_dropped() {
         let before = runtime.events(&thread).unwrap();
         assert!(matches!(
             runtime.recover(&thread),
+            Err(RuntimeError::ConcurrentTurn(_))
+        ));
+        assert!(matches!(
+            another_runtime.recover(&thread),
+            Err(RuntimeError::ConcurrentTurn(_))
+        ));
+        assert!(matches!(
+            block_on(another_runtime.run_turn(&thread, "competing turn")),
             Err(RuntimeError::ConcurrentTurn(_))
         ));
         assert_eq!(runtime.events(&thread).unwrap(), before);

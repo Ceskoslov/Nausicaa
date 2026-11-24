@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use thiserror::Error;
 
@@ -18,7 +18,7 @@ use crate::policy::{CapabilityProjection, PolicyContext, ToolPolicy, project_cap
 use crate::protocol::{ToolCall, ToolReceipt, TranscriptMessage};
 use crate::recovery::{RecoveryReport, recover_thread};
 use crate::retry::{ModelRetryPolicy, RetryTimer, wait_for_retry};
-use crate::store::{EventStore, StoreError};
+use crate::store::{ActiveThread, EventStore, StoreError, ThreadGuards};
 use crate::tool::{ToolExecutionContext, ToolRegistry};
 
 #[derive(Clone, Debug)]
@@ -112,7 +112,7 @@ pub struct AgentRuntime {
     config: RuntimeConfig,
     task_budget: Option<TaskBudget>,
     model_retry: Option<(ModelRetryPolicy, Arc<dyn RetryTimer>)>,
-    active_threads: Mutex<BTreeSet<ThreadId>>,
+    active_threads: ThreadGuards,
 }
 
 impl AgentRuntime {
@@ -140,7 +140,7 @@ impl AgentRuntime {
             config: RuntimeConfig::default(),
             task_budget: None,
             model_retry: None,
-            active_threads: Mutex::new(BTreeSet::new()),
+            active_threads: ThreadGuards::default(),
         }
     }
 
@@ -239,7 +239,7 @@ impl AgentRuntime {
         self.recover_exclusive(thread_id)
     }
 
-    // The caller must hold this runtime's active-thread guard.
+    // The caller must hold the active-thread guard.
     fn recover_exclusive(&self, thread_id: &ThreadId) -> Result<RecoveryReport, RuntimeError> {
         let before = self
             .store
@@ -737,17 +737,11 @@ impl AgentRuntime {
     }
 
     fn acquire_thread(&self, thread_id: &ThreadId) -> Result<ActiveThread<'_>, RuntimeError> {
-        let mut active = self
-            .active_threads
-            .lock()
-            .map_err(|_| StoreError::Poisoned)?;
-        if !active.insert(thread_id.clone()) {
-            return Err(RuntimeError::ConcurrentTurn(thread_id.clone()));
-        }
-        Ok(ActiveThread {
-            active: &self.active_threads,
-            thread_id: thread_id.clone(),
-        })
+        self.store
+            .thread_guards()
+            .unwrap_or(&self.active_threads)
+            .try_acquire(thread_id)?
+            .ok_or_else(|| RuntimeError::ConcurrentTurn(thread_id.clone()))
     }
 
     fn cancel_turn<T>(
@@ -853,19 +847,6 @@ impl AgentRuntime {
     fn notify(&self, event: &EventEnvelope) {
         for observer in &self.observers {
             observer.on_event(event);
-        }
-    }
-}
-
-struct ActiveThread<'a> {
-    active: &'a Mutex<BTreeSet<ThreadId>>,
-    thread_id: ThreadId,
-}
-
-impl Drop for ActiveThread<'_> {
-    fn drop(&mut self) {
-        if let Ok(mut active) = self.active.lock() {
-            active.remove(&self.thread_id);
         }
     }
 }

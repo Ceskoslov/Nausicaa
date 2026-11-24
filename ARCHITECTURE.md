@@ -129,13 +129,17 @@ task-ledger JSONL readers still reject malformed tails.
 [Recovery](crates/harness-core/src/recovery.rs) records missing call receipts:
 started executions become `unknown`; calls that never started become failed.
 Interrupted turns become failed. It never automatically replays external actions.
-`AgentRuntime::recover` rejects active turns in the same runtime;
-`recover_thread` is a lower-level API requiring exclusive ownership by its caller.
+`AgentRuntime::recover` and turn execution share a per-thread guard across
+runtimes using the same built-in event store. The lower-level `recover_thread`
+API requires exclusive ownership by its caller.
 
-These are in-process guarantees, not cross-process transactions. Separate store
-instances are not coordinated, JSONL histories are loaded into memory, and there
-is no checkpoint/snapshot format or distributed locking protocol. Applications
-must coordinate ownership before sharing a log.
+On Linux and macOS, opening the JSONL event store acquires a nonblocking
+exclusive advisory lock on the open log file before replay, repair, or append.
+The descriptor holds ownership until the store closes. Existing event records
+need no migration. Deploy cooperating writers together and keep the open log
+at the same inode, as older binaries and tools writing directly can bypass the
+lock. Other platforms and custom stores must coordinate ownership with the host.
+JSONL history remains in memory and the lock is local to the file.
 
 ## Background tasks and leases
 

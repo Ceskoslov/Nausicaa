@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -17,6 +18,8 @@ pub enum StoreError {
     Serialization(String),
     #[error("corrupt event at line {line}: {message}")]
     Corrupt { line: usize, message: String },
+    #[error("event log already has an owner: {}", .0.display())]
+    Locked(PathBuf),
     #[error("event store lock was poisoned")]
     Poisoned,
 }
@@ -32,6 +35,49 @@ pub trait EventStore: Send + Sync {
     ) -> Result<EventEnvelope, StoreError>;
 
     fn load_thread(&self, thread_id: &ThreadId) -> Result<Vec<EventEnvelope>, StoreError>;
+
+    /// Share turn and recovery ownership across runtimes using this store.
+    /// Custom stores may return a shared guard set or coordinate externally.
+    fn thread_guards(&self) -> Option<&ThreadGuards> {
+        None
+    }
+}
+
+/// In-process ownership shared by runtimes that use the same store instance.
+#[derive(Debug, Default)]
+pub struct ThreadGuards(Mutex<BTreeSet<ThreadId>>);
+
+impl ThreadGuards {
+    pub(crate) fn try_acquire(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Option<ActiveThread<'_>>, StoreError> {
+        if !self
+            .0
+            .lock()
+            .map_err(|_| StoreError::Poisoned)?
+            .insert(thread_id.clone())
+        {
+            return Ok(None);
+        }
+        Ok(Some(ActiveThread {
+            guards: self,
+            thread_id: thread_id.clone(),
+        }))
+    }
+}
+
+pub(crate) struct ActiveThread<'a> {
+    guards: &'a ThreadGuards,
+    thread_id: ThreadId,
+}
+
+impl Drop for ActiveThread<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut active) = self.guards.0.lock() {
+            active.remove(&self.thread_id);
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -42,6 +88,7 @@ struct MemoryState {
 
 #[derive(Debug, Default)]
 pub struct MemoryEventStore {
+    guards: ThreadGuards,
     state: Mutex<MemoryState>,
 }
 
@@ -60,6 +107,10 @@ impl MemoryEventStore {
 }
 
 impl EventStore for MemoryEventStore {
+    fn thread_guards(&self) -> Option<&ThreadGuards> {
+        Some(&self.guards)
+    }
+
     fn append(
         &self,
         thread_id: ThreadId,
@@ -96,6 +147,7 @@ struct JsonlState {
 /// before observers or the next model iteration can see it.
 #[derive(Debug)]
 pub struct JsonlEventStore {
+    guards: ThreadGuards,
     path: PathBuf,
     recovered_tail: Option<PathBuf>,
     state: Mutex<JsonlState>,
@@ -110,6 +162,8 @@ impl JsonlEventStore {
             .append(true)
             .open(&path)
             .map_err(io_error)?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        lock_log(&file, &path)?;
 
         let mut events = Vec::new();
         let mut reader = BufReader::new(&file);
@@ -189,6 +243,7 @@ impl JsonlEventStore {
             .map_or(0, |sequence| sequence + 1);
 
         Ok(Self {
+            guards: ThreadGuards::default(),
             path,
             recovered_tail,
             state: Mutex::new(JsonlState {
@@ -213,6 +268,10 @@ impl JsonlEventStore {
 }
 
 impl EventStore for JsonlEventStore {
+    fn thread_guards(&self) -> Option<&ThreadGuards> {
+        Some(&self.guards)
+    }
+
     fn append(
         &self,
         thread_id: ThreadId,
@@ -248,6 +307,27 @@ impl EventStore for JsonlEventStore {
             .filter(|event| &event.thread_id == thread_id)
             .cloned()
             .collect())
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn lock_log(file: &File, path: &Path) -> Result<(), StoreError> {
+    use std::io::ErrorKind;
+    use std::os::fd::AsRawFd;
+
+    loop {
+        // The descriptor belongs to the live file, which retains ownership
+        // through replay, repair and all subsequent append operations.
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        match error.kind() {
+            ErrorKind::Interrupted => continue,
+            ErrorKind::WouldBlock => return Err(StoreError::Locked(path.to_path_buf())),
+            _ => return Err(io_error(error)),
+        }
     }
 }
 
