@@ -403,7 +403,8 @@ mod tests {
     #[test]
     fn append_failure_preserves_state_and_poisons_writes() {
         let mut journal = TaskJournal {
-            file: OpenOptions::new().write(true).open("/dev/full").unwrap(),
+            // A read-only descriptor deterministically rejects writes on Unix.
+            file: File::open("/dev/null").unwrap(),
             state: initial_state(TaskSpec {
                 objective: "test".into(),
                 criteria: vec![Criterion {
