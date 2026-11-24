@@ -116,13 +116,21 @@ impl TaskBudget {
         let charge = input
             .checked_add(output_cap)
             .ok_or(TaskBudgetError::GenerationTokens)?;
-        self.0
-            .remaining_tokens
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
-                remaining.checked_sub(charge)
-            })
-            .map_err(|_| TaskBudgetError::GenerationTokens)?;
-        Ok(())
+        let mut remaining = self.remaining_tokens();
+        loop {
+            let after = remaining
+                .checked_sub(charge)
+                .ok_or(TaskBudgetError::GenerationTokens)?;
+            match self.0.remaining_tokens.compare_exchange_weak(
+                remaining,
+                after,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(current) => remaining = current,
+            }
+        }
     }
 }
 

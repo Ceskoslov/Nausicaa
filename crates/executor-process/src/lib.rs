@@ -591,9 +591,17 @@ fn kill_process_group(child: &std::process::Child) -> Result<(), ProcessError> {
     let result = unsafe { libc::kill(-pid, libc::SIGKILL) };
     if result == -1 {
         let error = std::io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::ESRCH) {
-            return Err(io_error(error));
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(());
         }
+        // XNU can report EPERM for an existing group with only zombie
+        // members. Confirm the leader exited without reaping it, then let
+        // the bounded pipe cleanup finish and preserve the foreground status.
+        #[cfg(target_os = "macos")]
+        if error.raw_os_error() == Some(libc::EPERM) && child_has_exited(child)? {
+            return Ok(());
+        }
+        return Err(io_error(error));
     }
     Ok(())
 }
