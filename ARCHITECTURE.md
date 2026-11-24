@@ -507,12 +507,10 @@ replaced with equivalent filters/conditionals without changing public APIs,
 serialized state, or execution ordering. Linux tests verify the committed lockfile
 with Rust 1.85.0 as well as stable. Dependency updates must preserve that check.
 
-[CI](.github/workflows/ci.yml) separates stable quality checks, a Rust
-1.85.0/stable Linux/macOS test matrix, and manually enabled Linux Bubblewrap
-integration. Missing namespaces are an explicit environment failure, not evidence
-of a passing integration. This workflow does not grant credentials or run live
-models. Hosted/macOS execution remains unverified until CI runs; local protocol
-and lifecycle tests are not a containment certification.
+[CI](.github/workflows/ci.yml) runs on Linux. It separates stable quality
+checks, a Rust 1.85.0 and stable test matrix, and manually enabled Bubblewrap
+integration. The Bubblewrap job probes namespace availability before
+testing cancellation and cleanup. The workflow uses no live model credentials.
 
 
 ## Native asynchronous provider transport

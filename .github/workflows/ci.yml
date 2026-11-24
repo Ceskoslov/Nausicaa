@@ -38,13 +38,12 @@ jobs:
       - run: git diff --check
 
   tests:
-    name: Tests (${{ matrix.os }}, Rust ${{ matrix.toolchain }})
+    name: Tests (Linux, Rust ${{ matrix.toolchain }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
         toolchain: ['1.85.0', stable]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

@@ -825,7 +825,7 @@ The core integration tests cover capability restriction, exact-action approval, 
 - The task ledger has recovery semantics but no resident gateway, routing layer, or distributed worker implementation.
 - Parent/child capability intersection is implemented, but a complete subagent/worktree scheduler is not included.
 - Workspace path and symlink validation are defense-in-depth checks, not substitutes for a process sandbox.
-- Rust 1.85.0 is verified locally on Linux. The hosted matrix tests Linux and macOS with Rust 1.85.0 and stable. [GitHub Actions results](https://github.com/Ceskoslov/Nausicaa/actions/workflows/ci.yml)
+- Rust 1.85.0 is verified locally on Linux. The hosted matrix tests Linux with Rust 1.85.0 and stable. [GitHub Actions results](https://github.com/Ceskoslov/Nausicaa/actions/workflows/ci.yml)
 
 ## Repository layout
 

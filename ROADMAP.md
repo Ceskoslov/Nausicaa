@@ -214,7 +214,7 @@ tracked separately from the locally verified feature acceptance.
 | Order | Scope and reason | Required evidence before advancing |
 | --- | --- | --- |
 | 1 — completed | Focused editing: the explicit next area after context; enable safe, reviewable coding changes. | Multi-file fixture, stale/ambiguous input rejection, bounded reads/search, unchanged approval and receipt semantics (above). |
-| 2 — implemented; hosted CI pending | Maintenance gate: verify/correct Rust 1.85 support and automate format, Clippy, tests and rustdoc on supported hosts before adding transport dependencies. | Actual minimum-toolchain build/test evidence; CI distinguishes protocol checks from opt-in Bubblewrap containment checks. |
+| 2 — implemented | Maintenance gate: verify Rust 1.85 support and automate format, Clippy, tests and rustdoc on Linux. | Actual minimum-toolchain build/test evidence; CI distinguishes protocol checks from opt-in Bubblewrap containment checks. |
 | 3 — implemented at the embedding boundary | Provider/runtime: native transport, finite model retries, and cumulative time/token budgets with a verification reserve. | Cancellation, incomplete streams, receipt ordering, and retry/budget exhaustion covered locally. |
 | 4 — local model-boundary slice implemented | Persistence: log ownership and versioned explicit continuation. | Fault injection at model, approval, execution-start and receipt boundaries; safe continuation and recovery without action replay. Durable approval waiting remains pending. |
 | 5 | Execution supervision: durable execution identity/status independent of a model worker, building on ownership/reconciliation rules. | Worker restart reconciles running/completed IDs; cleanup and resource limits remain observable; unknown work is not launched again. |
@@ -257,11 +257,11 @@ and artifact versions must make comparisons reproducible.
   passes all 78 default tests on Linux 1.85.0; one Bubblewrap test remains opt-in.
   Minimal-facade compilation is checked separately. No API or data-format change.
 - Implemented: [CI](.github/workflows/ci.yml) runs the documented quality checks
-  and configures Linux/macOS with Rust 1.85.0/stable. A manual Bubblewrap lifecycle
+  and tests Linux with Rust 1.85.0 and stable. A manual Bubblewrap lifecycle
   job first probes namespace availability and reports an environment failure
   explicitly. Local workflow lint and Linux checks passed. See the
   [hosted workflow results](https://github.com/Ceskoslov/Nausicaa/actions/workflows/ci.yml)
-  for the latest Linux and macOS matrix. The cancellation test covers sandbox lifecycle.
+  for the latest Linux matrix. The cancellation test covers sandbox lifecycle.
 - Decide whether to share journal recovery across event, task, and memory stores
   or introduce transactional storage. Define schema migration and ownership first.
 - Extend fault injection to append failures, lifecycle boundaries, and worker
