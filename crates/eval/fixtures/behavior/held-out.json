@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "id": "sum-held-out",
+  "split": "held-out",
+  "objective": "Sum an input slice of i16 values into an i64, including an empty slice.",
+  "initial": "pub fn sum(_: &[i16]) -> i64 { 0 }",
+  "expected": "pub fn sum(xs: &[i16]) -> i64 { xs.iter().copied().map(i64::from).sum() }",
+  "proposals": ["pub fn sum(xs: &[i16]) -> i64 { xs.iter().fold(0, |acc, &x| acc + i64::from(x)) }"],
+  "max_attempts": 1,
+  "deny_write": false,
+  "interrupt_execution": false
+}

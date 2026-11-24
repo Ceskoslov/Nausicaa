@@ -551,3 +551,10 @@ paths. Tool execution remains outside the retry loop.
 enabling retries, because older readers do not recognize retry events. Existing
 logs require no rewrite. A failed or interrupted model request may still have
 consumed provider resources.
+
+The opt-in scripted Rust behavior suite uses the same evaluation loop with
+a host verifier. It compiles a fresh retained source snapshot with fixed host
+assertions and records bounded process results. The model cannot write the
+verdict artifact. The verifier supplies that artifact to the existing
+exact-content gate, so the journal stays at version 1 and replay uses retained
+evidence. The new mode accepts only built-in scripted fixtures.

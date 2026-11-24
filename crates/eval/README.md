@@ -114,3 +114,25 @@ The [2026-09-11 Nemotron free-route report](reports/2026-09-11-nemotron-free.md)
 records a completed eight-run live validation, including exact-content failures,
 supplementary behavioral diagnostics, usage, authority checks and reproducibility
 limits. Its live measurements are separate from the scripted baseline above.
+
+## Scripted Rust behavior checks
+
+```sh
+cargo run -p agent-harness-eval --offline -- --behavior --output /tmp/nausicaa-behavior-v1
+```
+
+The behavior suite runs three fixed repository fixtures in both modes. It
+requires a Unix host and `rustc`. Each attempt retains its source, host assertion
+file, bounded compiler and test results, and tool receipts. The host derives a
+verdict from process exit status and timeout, saves it as an artifact, and
+provides feedback separately from model output. This path runs the built-in
+scripted proposals locally, with a 10-second compilation limit, a 2-second
+execution limit and a 16 KiB output cap per stream. It is incompatible with
+`--live-config`.
+
+The clamp fixture compiles but fails a behavior assertion on the first attempt
+and succeeds after a second proposal. The other fixtures accept an equivalent
+implementation immediately, including the fixed held-out slice sum. The
+scripted core-only runs verify 2/3 and report one false completion. The task runs
+verify 3/3 with zero false completions. These figures measure the scripted
+acceptance loop.

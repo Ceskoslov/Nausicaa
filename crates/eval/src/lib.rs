@@ -13,6 +13,9 @@ use agent_harness_task::*;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+mod behavior;
+pub use behavior::run_behavior_suite;
+
 pub type EvalResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -139,15 +142,19 @@ fn block_on<F: Future>(future: F) -> F::Output {
     }
 }
 
+fn scripted_model(fixture: &Fixture) -> Arc<dyn ModelAdapter> {
+    Arc::new(ScriptedModel {
+        fixture: fixture.clone(),
+        calls: AtomicUsize::new(0),
+    })
+}
+
 pub fn run_scripted(fixture: &Fixture, mode: Mode, directory: &Path) -> EvalResult<RunReport> {
     run(
         fixture,
         mode,
         directory,
-        Arc::new(ScriptedModel {
-            fixture: fixture.clone(),
-            calls: AtomicUsize::new(0),
-        }),
+        scripted_model(fixture),
         "scripted-v1",
         false,
     )
@@ -162,6 +169,18 @@ pub fn run(
     model: Arc<dyn ModelAdapter>,
     model_id: &str,
     live_model: bool,
+) -> EvalResult<RunReport> {
+    run_with_verifier(fixture, mode, directory, model, model_id, live_model, None)
+}
+
+fn run_with_verifier(
+    fixture: &Fixture,
+    mode: Mode,
+    directory: &Path,
+    model: Arc<dyn ModelAdapter>,
+    model_id: &str,
+    live_model: bool,
+    verifier: Option<&behavior::BehaviorVerifier>,
 ) -> EvalResult<RunReport> {
     if fixture.version != 1 || fixture.proposals.is_empty() || fixture.max_attempts == 0 {
         return Err("unsupported or invalid fixture".into());
@@ -180,11 +199,14 @@ pub fn run(
     )?;
     let spec = TaskSpec {
         objective: fixture.objective.clone(),
-        criteria: vec![Criterion {
-            id: "source-content-v1".into(),
-            artifact_id: "lib.rs".into(),
-            expected: fixture.expected.clone(),
-        }],
+        criteria: vec![verifier.map_or_else(
+            || Criterion {
+                id: "source-content-v1".into(),
+                artifact_id: "lib.rs".into(),
+                expected: fixture.expected.clone(),
+            },
+            behavior::BehaviorVerifier::criterion,
+        )],
         budget: Budget {
             max_attempts: fixture.max_attempts,
         },
@@ -233,10 +255,17 @@ pub fn run(
     let mut normal_completion = false;
     let mut verified_success;
     let mut turn_errors = Vec::new();
-    let mut input = format!(
-        "{}\nEdit lib.rs. Required exact source contents:\n{}",
-        fixture.objective, fixture.expected
-    );
+    let mut input = if verifier.is_some() {
+        format!(
+            "{}\nEdit lib.rs to pass the host behavior checks.",
+            fixture.objective
+        )
+    } else {
+        format!(
+            "{}\nEdit lib.rs. Required exact source contents:\n{}",
+            fixture.objective, fixture.expected
+        )
+    };
     loop {
         let turn = TurnId::new();
         if let Some(task) = &mut task {
@@ -288,18 +317,28 @@ pub fn run(
                 _ => None,
             })
             .collect();
-        let artifacts = vec![ArtifactRef {
+        let source = std::fs::read_to_string(workspace.join("lib.rs"))?;
+        let mut artifacts = vec![ArtifactRef {
             id: "lib.rs".into(),
-            content: std::fs::read_to_string(workspace.join("lib.rs"))?,
+            content: source,
         }];
+        let mut behavior_feedback = None;
+        if let Some(verifier) = verifier {
+            let (verdict, feedback) =
+                verifier.verify(directory, attempts, &artifacts[0].content)?;
+            artifacts.push(verdict);
+            behavior_feedback = Some(feedback);
+        }
         let checks = CompletionGate::check(&spec, &artifacts);
         verified_success = checks.iter().all(|c| c.passed)
             && !receipts.iter().any(|r| r.status == ReceiptStatus::Unknown);
         std::fs::write(
             directory.join(format!("evidence-{attempts}.json")),
-            serde_json::to_vec_pretty(
-                &json!({"turn_id": turn, "artifacts": artifacts, "checks": checks, "receipts": receipts}),
-            )?,
+            serde_json::to_vec_pretty(&if let Some(feedback) = &behavior_feedback {
+                json!({"turn_id": turn, "artifacts": artifacts, "checks": checks, "receipts": receipts, "behavior_feedback": feedback})
+            } else {
+                json!({"turn_id": turn, "artifacts": artifacts, "checks": checks, "receipts": receipts})
+            })?,
         )?;
         let Some(task) = &mut task else {
             break;
@@ -316,7 +355,7 @@ pub fn run(
         input = format!(
             "{}\nVerification feedback:\n{}",
             fixture.objective,
-            task.state().remaining_work.join("\n")
+            behavior_feedback.unwrap_or_else(|| task.state().remaining_work.join("\n"))
         );
     }
     let events = store.load_thread(&thread)?;

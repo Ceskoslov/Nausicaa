@@ -2,16 +2,17 @@ use agent_harness_core::{CallId, RuntimeEvent};
 use agent_harness_eval::{Mode, fixtures, run_scripted};
 use agent_harness_task::{TaskJournal, TaskStatus};
 
+struct Cleanup(std::path::PathBuf);
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+
 #[test]
 fn paired_fixtures_measure_false_completion_repair_and_authority() {
     let root = std::env::temp_dir().join(format!("nausicaa-eval-{}", CallId::new()));
     std::fs::create_dir(&root).unwrap();
-    struct Cleanup(std::path::PathBuf);
-    impl Drop for Cleanup {
-        fn drop(&mut self) {
-            std::fs::remove_dir_all(&self.0).unwrap();
-        }
-    }
     let _cleanup = Cleanup(root.clone());
     let mut core_false = 0;
     let mut task_false = 0;
@@ -80,4 +81,38 @@ fn paired_fixtures_measure_false_completion_repair_and_authority() {
     }
     assert_eq!(core_false, 3);
     assert_eq!(task_false, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn paired_behavior_checks_repair_and_accept_equivalent_code() {
+    let root = std::env::temp_dir().join(format!("nausicaa-behavior-{}", CallId::new()));
+    let reports = agent_harness_eval::run_behavior_suite(&root).unwrap();
+    let _cleanup = Cleanup(root.clone());
+    assert_eq!(reports.len(), 6);
+    for report in reports {
+        assert!(!report.live_model);
+        let first_bad = report.fixture.id == "clamp-repair";
+        let core = matches!(report.mode, Mode::CoreOnly);
+        assert_eq!(report.verified_success, !(first_bad && core));
+        assert_eq!(report.false_completion, first_bad && core);
+        assert_eq!(report.attempts, if first_bad && !core { 2 } else { 1 });
+        let first: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                report
+                    .artifact_directory
+                    .join("behavior-1/verification.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(first["passed"], !first_bad);
+        if !core {
+            let journal = TaskJournal::open(report.artifact_directory.join("task.jsonl")).unwrap();
+            assert_eq!(journal.state().status, TaskStatus::Succeeded);
+            let evidence = journal.state().evidence.last().unwrap();
+            assert_eq!(evidence.checks[0].artifact_id, "host-rust-verdict");
+            assert_ne!(evidence.artifacts[0].content, report.fixture.expected);
+        }
+    }
 }

@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "id": "even-equivalent",
+  "split": "development",
+  "objective": "Return whether a signed integer is even, including zero and negative values.",
+  "initial": "pub fn is_even(_: i32) -> bool { false }",
+  "expected": "pub fn is_even(x: i32) -> bool { x % 2 == 0 }",
+  "proposals": ["pub fn is_even(x: i32) -> bool { x & 1 == 0 }"],
+  "max_attempts": 1,
+  "deny_write": false,
+  "interrupt_execution": false
+}

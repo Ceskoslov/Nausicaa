@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "clamp-repair",
+  "split": "development",
+  "objective": "Implement clamp for values below, within, and above the inclusive range. Bounds are ordered.",
+  "initial": "pub fn clamp(x: i32, _: i32, _: i32) -> i32 { x }",
+  "expected": "pub fn clamp(x: i32, low: i32, high: i32) -> i32 { x.clamp(low, high) }",
+  "proposals": [
+    "pub fn clamp(x: i32, low: i32, _: i32) -> i32 { x.max(low) }",
+    "pub fn clamp(x: i32, low: i32, high: i32) -> i32 { x.max(low).min(high) }"
+  ],
+  "max_attempts": 2,
+  "deny_write": false,
+  "interrupt_execution": false
+}

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use agent_harness_eval::{EvalResult, Mode, fixtures, run_scripted};
+use agent_harness_eval::{EvalResult, Mode, fixtures, run_behavior_suite, run_scripted};
 
 #[cfg(feature = "live")]
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -40,6 +40,7 @@ fn main() -> EvalResult<()> {
     let mut args = std::env::args().skip(1);
     let mut output = None;
     let mut live_config = None;
+    let mut behavior = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--output" => {
@@ -47,18 +48,33 @@ fn main() -> EvalResult<()> {
                     args.next().ok_or("missing output directory")?,
                 ))
             }
+            "--behavior" => behavior = true,
             "--live-config" => {
                 live_config = Some(PathBuf::from(args.next().ok_or("missing live config")?))
             }
             _ => {
                 return Err(
-                    "usage: agent-harness-eval --output NEW_DIRECTORY [--live-config CONFIG.json]"
+                    "usage: agent-harness-eval --output NEW_DIRECTORY [--behavior | --live-config CONFIG.json]"
                         .into(),
                 );
             }
         }
     }
     let output = output.ok_or("--output NEW_DIRECTORY is required")?;
+    if behavior {
+        if live_config.is_some() {
+            return Err("--behavior and --live-config are mutually exclusive".into());
+        }
+        let summary = serde_json::json!({
+            "schema_version": 1,
+            "fixture_suite": "rust-behavior-v1",
+            "runs": run_behavior_suite(&output)?,
+        });
+        let path = output.join("summary.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(&summary)?)?;
+        println!("{}", path.display());
+        return Ok(());
+    }
     #[cfg(not(feature = "live"))]
     if live_config.is_some() {
         return Err("live runs require --features live".into());
