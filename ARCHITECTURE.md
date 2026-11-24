@@ -506,8 +506,7 @@ or prove its billing outcome. DNS lookup can use Tokio's resolver facilities.
 First-text and total times are measured; unavailable DNS/TCP/TLS/first-byte
 measurements remain unknown. On abandonment, only total time is retained. Native
 protocol/cancellation errors are nonretryable, HTTP 429/5xx and I/O failures are
-eligible flags only; no runtime retry loop exists. Existing blocking error
-classification is unchanged. Reqwest I/O errors omit URLs; HTTP error body excerpts
+eligible for opt-in runtime retries. Both included transports use the same error classification. Reqwest I/O errors omit URLs; HTTP error body excerpts
 are bounded to 4096 characters but remain provider-controlled content.
 
 The feature and canonical protocol are additive, with no event-format migration,
@@ -534,3 +533,21 @@ The host must install a model-specific final-request counter. Budget state
 is in-process. If the host loses the state during a restart, it must block
 further generation for that task until it can reconcile its budget. The
 attempt-only journal and its version-1 data continue to use their existing API.
+
+
+## Bounded model retries
+
+The runtime can opt in with a `ModelRetryPolicy` and host `RetryTimer`. Each
+logical iteration compiles context and projects tool definitions once. Only
+an eligible model error before response acceptance permits another request.
+Backoff observes cancellation and the optional task deadline before each
+short wait and before dispatch. The adapter independently charges every
+admitted HTTP attempt against the task token budget. Protocol errors and
+completed responses with abnormal stop reasons keep their existing failure
+paths. Tool execution remains outside the retry loop.
+
+`model_request_retried` is an additive durable event. The original
+`model_request_started` still counts logical iterations. Upgrade readers before
+enabling retries, because older readers do not recognize retry events. Existing
+logs require no rewrite. A failed or interrupted model request may still have
+consumed provider resources.

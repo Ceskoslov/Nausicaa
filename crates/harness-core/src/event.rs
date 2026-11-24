@@ -30,6 +30,10 @@ pub enum RuntimeEvent {
     ModelRequestStarted {
         iteration: usize,
     },
+    ModelRequestRetried {
+        iteration: usize,
+        retry: u32,
+    },
     AssistantMessage {
         content: String,
         tool_calls: Vec<ToolCall>,

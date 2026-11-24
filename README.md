@@ -790,7 +790,7 @@ The core integration tests cover capability restriction, exact-action approval, 
 ## Current limitations
 
 - Normal turn completion is not independent task acceptance. The optional task layer checks exact artifact contents supplied by a trusted host; it is not a general code evaluator or automatic scheduler. The paired offline evaluation runner measures this narrow baseline.
-- The included provider supports Chat Completions and optional SSE over curl or optional native reqwest/Tokio. The core does not automatically retry `ModelError` values marked retryable; cumulative task time/token budgets remain planned.
+- The included provider supports Chat Completions and optional SSE over curl or optional native reqwest/Tokio. Bounded model retries and cumulative task time/token budgets are opt-in. The host supplies a timer, final-request counter, and verification deadline enforcement.
 - Deterministic compaction drops complete old message groups and records the count; it does not generate a semantic summary. The character cap is an approximate byte-size check. Optional final provider-request budgeting requires a trusted model-specific token counter; optional output externalization retains original durable receipts and requires explicitly authorized retrieval.
 - JSONL stores provide synchronized append and `sync_data` durability within one process, not cross-process distributed locking.
 - Only the core event store repairs incomplete final JSONL records; the memory and task-ledger stores still reject malformed tails.

@@ -15,6 +15,7 @@ pub mod model;
 pub mod policy;
 pub mod protocol;
 pub mod recovery;
+pub mod retry;
 pub mod runtime;
 pub mod store;
 pub mod tool;
@@ -43,6 +44,7 @@ pub use protocol::{
     ToolReceipt, TranscriptMessage,
 };
 pub use recovery::{RecoveryReport, recover_thread};
+pub use retry::{ModelRetryPolicy, RetryTimer};
 pub use runtime::{AgentRuntime, RuntimeConfig, RuntimeError, TurnOutcome};
 pub use store::{EventStore, JsonlEventStore, MemoryEventStore, StoreError};
 pub use tool::{

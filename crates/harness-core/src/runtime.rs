@@ -17,6 +17,7 @@ use crate::model::{
 use crate::policy::{CapabilityProjection, PolicyContext, ToolPolicy, project_capabilities};
 use crate::protocol::{ToolCall, ToolReceipt, TranscriptMessage};
 use crate::recovery::{RecoveryReport, recover_thread};
+use crate::retry::{ModelRetryPolicy, RetryTimer, wait_for_retry};
 use crate::store::{EventStore, StoreError};
 use crate::tool::{ToolExecutionContext, ToolRegistry};
 
@@ -71,6 +72,12 @@ pub enum RuntimeError {
         turn_id: TurnId,
         stop_reason: StopReason,
     },
+    #[error("model request retry limit ({retries}) exhausted: {last_error}")]
+    ModelRetriesExhausted {
+        retries: u32,
+        #[source]
+        last_error: ModelError,
+    },
     #[error(transparent)]
     TaskBudget(#[from] TaskBudgetError),
     #[error("turn `{0}` was cancelled")]
@@ -104,6 +111,7 @@ pub struct AgentRuntime {
     model_observer: Option<Arc<dyn ModelProgressObserver>>,
     config: RuntimeConfig,
     task_budget: Option<TaskBudget>,
+    model_retry: Option<(ModelRetryPolicy, Arc<dyn RetryTimer>)>,
     active_threads: Mutex<BTreeSet<ThreadId>>,
 }
 
@@ -131,6 +139,7 @@ impl AgentRuntime {
             model_observer: None,
             config: RuntimeConfig::default(),
             task_budget: None,
+            model_retry: None,
             active_threads: Mutex::new(BTreeSet::new()),
         }
     }
@@ -187,6 +196,17 @@ impl AgentRuntime {
     #[must_use]
     pub fn with_task_budget(mut self, budget: TaskBudget) -> Self {
         self.task_budget = Some(budget);
+        self
+    }
+
+    /// Opt in to retrying eligible model errors before accepting a response.
+    #[must_use]
+    pub fn with_model_retry(
+        mut self,
+        policy: ModelRetryPolicy,
+        timer: Arc<dyn RetryTimer>,
+    ) -> Self {
+        self.model_retry = Some((policy, timer));
         self
     }
 
@@ -340,31 +360,63 @@ impl AgentRuntime {
                 RuntimeEvent::ModelRequestStarted { iteration },
             )?;
 
-            let response = match self
-                .model
-                .complete_controlled(
-                    ModelRequest {
-                        thread_id: thread_id.clone(),
-                        turn_id: turn_id.clone(),
-                        iteration,
-                        context: compiled,
-                        tools: visible_tools.clone(),
-                    },
-                    ModelControl {
-                        cancellation: cancellation.clone(),
-                        observer: self.model_observer.clone(),
-                    },
-                )
-                .await
-            {
-                Ok(response) => response,
-                Err(error) => {
-                    if cancellation.is_cancelled() {
-                        return self.cancel_turn(thread_id, &turn_id, &cancellation, &[]);
-                    }
+            let request = ModelRequest {
+                thread_id: thread_id.clone(),
+                turn_id: turn_id.clone(),
+                iteration,
+                context: compiled,
+                tools: visible_tools.clone(),
+            };
+            let mut retries = 0;
+            let mut delay = self
+                .model_retry
+                .as_ref()
+                .map(|(policy, _)| policy.initial_delay());
+            let response = loop {
+                let error = match self
+                    .model
+                    .complete_controlled(
+                        request.clone(),
+                        ModelControl {
+                            cancellation: cancellation.clone(),
+                            observer: self.model_observer.clone(),
+                        },
+                    )
+                    .await
+                {
+                    Ok(response) => break response,
+                    Err(error) => error,
+                };
+                if cancellation.is_cancelled() {
+                    return self.cancel_turn(thread_id, &turn_id, &cancellation, &[]);
+                }
+                let retry_policy = self.model_retry.as_ref().filter(|_| error.retryable);
+                let Some(((policy, timer), current_delay)) = retry_policy.zip(delay) else {
                     self.fail_turn(thread_id, &turn_id, error.to_string())?;
                     return Err(error.into());
+                };
+                if retries >= policy.max_retries() {
+                    let error = RuntimeError::ModelRetriesExhausted {
+                        retries,
+                        last_error: error,
+                    };
+                    self.fail_turn(thread_id, &turn_id, error.to_string())?;
+                    return Err(error);
                 }
+                wait_for_retry(timer.as_ref(), current_delay, &cancellation).await;
+                delay = Some(policy.next_delay(current_delay));
+                if cancellation.is_cancelled() {
+                    return self.cancel_turn(thread_id, &turn_id, &cancellation, &[]);
+                }
+                retries += 1;
+                self.append(
+                    thread_id.clone(),
+                    Some(turn_id.clone()),
+                    RuntimeEvent::ModelRequestRetried {
+                        iteration,
+                        retry: retries,
+                    },
+                )?;
             };
 
             if let Err(reason) = validate_tool_calls(&response.tool_calls, &seen_call_ids) {

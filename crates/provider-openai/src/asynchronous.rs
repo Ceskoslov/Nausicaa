@@ -69,15 +69,7 @@ pub(super) async fn complete(
                 &mut timings,
             )
             .await
-            .map_err(|error| {
-                let retryable = !http.is_cancelled()
-                    && match &error {
-                        TransportError::Io(_) => true,
-                        TransportError::Http { status, .. } => *status == 429 || *status >= 500,
-                        TransportError::Protocol(_) => false,
-                    };
-                ModelError::new(error.to_string(), retryable)
-            })?;
+            .map_err(|error| error.into_model_error(&http))?;
         http.check()
             .map_err(|e| ModelError::new(e.to_string(), false))?;
         parse_response(response.body)

@@ -49,6 +49,18 @@ pub enum TransportError {
     Http { status: u16, body: String },
 }
 
+impl TransportError {
+    fn into_model_error(self, control: &HttpControl) -> ModelError {
+        let retryable = !control.is_cancelled()
+            && match &self {
+                Self::Io(_) => true,
+                Self::Http { status, .. } => *status == 429 || (500..600).contains(status),
+                Self::Protocol(_) => false,
+            };
+        ModelError::new(self.to_string(), retryable)
+    }
+}
+
 pub trait HttpTransport: Send + Sync {
     fn post_json(&self, request: HttpRequest) -> Result<HttpResponse, TransportError>;
 
@@ -417,7 +429,7 @@ impl OpenAiCompatibleAdapter {
         }
         let response = transport
             .post_json_controlled(self.http_request(request)?, control, on_text, timings)
-            .map_err(|error| ModelError::new(error.to_string(), true))?;
+            .map_err(|error| error.into_model_error(control))?;
         parse_response(response.body)
     }
 }

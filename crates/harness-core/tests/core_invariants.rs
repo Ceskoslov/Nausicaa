@@ -27,12 +27,18 @@ fn block_on<F: Future>(future: F) -> F::Output {
 }
 
 struct ScriptedModel {
-    responses: Mutex<VecDeque<ModelResponse>>,
+    responses: Mutex<VecDeque<Result<ModelResponse, ModelError>>>,
     requests: Mutex<Vec<ModelRequest>>,
 }
 
 impl ScriptedModel {
     fn new(responses: impl IntoIterator<Item = ModelResponse>) -> Self {
+        Self::with_results(responses.into_iter().map(Ok))
+    }
+
+    fn with_results(
+        responses: impl IntoIterator<Item = Result<ModelResponse, ModelError>>,
+    ) -> Self {
         Self {
             responses: Mutex::new(responses.into_iter().collect()),
             requests: Mutex::new(Vec::new()),
@@ -55,7 +61,7 @@ impl ModelAdapter for ScriptedModel {
                 .lock()
                 .unwrap()
                 .pop_front()
-                .ok_or_else(|| ModelError::new("script exhausted", false))
+                .unwrap_or_else(|| Err(ModelError::new("script exhausted", false)))
         })
     }
 }
@@ -560,4 +566,103 @@ fn recovery_rejects_active_turn_and_recovers_after_future_is_dropped() {
             .turns_marked_failed
             .is_empty()
     );
+}
+
+struct RetryTestTimer(Option<agent_harness_core::CancellationToken>);
+
+impl agent_harness_core::RetryTimer for RetryTestTimer {
+    fn sleep(&self, _: std::time::Duration) -> BoxFuture<'_, ()> {
+        Box::pin(async {
+            if let Some(token) = &self.0 {
+                token.cancel();
+            }
+        })
+    }
+}
+
+#[test]
+fn retry_reuses_the_request_and_preserves_the_previous_receipt() {
+    use agent_harness_core::ModelRetryPolicy;
+    use std::time::Duration;
+    let call = ToolCall::new("echo", json!({"message": "hello"}));
+    let model = Arc::new(ScriptedModel::with_results([
+        Ok(ModelResponse::tool_calls(vec![call])),
+        Err(ModelError::new("transient", true)),
+        Ok(ModelResponse::text("done")),
+    ]));
+    let store = Arc::new(MemoryEventStore::new());
+    let executions = Arc::new(AtomicUsize::new(0));
+    let runtime = runtime(
+        model.clone(),
+        store.clone(),
+        CapabilityPolicy::deny_by_default().grant("echo", Access::Allow),
+        executions.clone(),
+    )
+    .with_model_retry(
+        ModelRetryPolicy::new(1, Duration::from_millis(5), Duration::from_millis(10)).unwrap(),
+        Arc::new(RetryTestTimer(None)),
+    );
+    let thread = runtime.start_thread().unwrap();
+    let outcome = block_on(runtime.run_turn(&thread, "run once")).unwrap();
+    assert_eq!(outcome.model_iterations, 2);
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    let requests = model.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[1], requests[2]);
+    let events = store.load_thread(&thread).unwrap();
+    let receipt = events
+        .iter()
+        .find(|event| matches!(event.event, RuntimeEvent::ToolReceiptRecorded { .. }))
+        .unwrap();
+    let retry = events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.event,
+                RuntimeEvent::ModelRequestRetried {
+                    iteration: 1,
+                    retry: 1
+                }
+            )
+        })
+        .unwrap();
+    assert!(receipt.sequence < retry.sequence);
+}
+
+#[test]
+fn retry_exhaustion_and_backoff_cancellation_end_the_turn() {
+    use agent_harness_core::{CancellationToken, ModelRetryPolicy};
+    use std::time::Duration;
+    for cancel in [false, true] {
+        let cancellation = CancellationToken::new();
+        let model = Arc::new(ScriptedModel::with_results([
+            Err(ModelError::new("transient", true)),
+            Err(ModelError::new("still transient", true)),
+        ]));
+        let store = Arc::new(MemoryEventStore::new());
+        let runtime = runtime(
+            model.clone(),
+            store,
+            CapabilityPolicy::deny_by_default(),
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .with_model_retry(
+            ModelRetryPolicy::new(1, Duration::from_millis(20), Duration::from_millis(40)).unwrap(),
+            Arc::new(RetryTestTimer(cancel.then(|| cancellation.clone()))),
+        );
+        let thread = runtime.start_thread().unwrap();
+        let error =
+            block_on(runtime.run_turn_with_cancellation(&thread, "test retries", cancellation))
+                .unwrap_err();
+        if cancel {
+            assert!(matches!(error, RuntimeError::Cancelled(_)));
+            assert_eq!(model.requests().len(), 1);
+        } else {
+            assert!(matches!(
+                error,
+                RuntimeError::ModelRetriesExhausted { retries: 1, .. }
+            ));
+            assert_eq!(model.requests().len(), 2);
+        }
+    }
 }
