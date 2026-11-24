@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::approval::{ApprovalDecision, ApprovalProvider, ApprovalRequest, DenyAllApprovals};
 use crate::context::{ContextCompiler, ContextError, ContextInput};
-use crate::control::CancellationToken;
+use crate::control::{CancellationToken, TaskBudget, TaskBudgetError};
 use crate::event::{EventEnvelope, EventObserver, HookPoint, RuntimeEvent};
 use crate::executor::{RejectingExecutor, ToolExecutor};
 use crate::hook::{HookContext, HookError, HookSet};
@@ -71,6 +71,8 @@ pub enum RuntimeError {
         turn_id: TurnId,
         stop_reason: StopReason,
     },
+    #[error(transparent)]
+    TaskBudget(#[from] TaskBudgetError),
     #[error("turn `{0}` was cancelled")]
     Cancelled(TurnId),
     #[error("turn `{turn_id}` exceeded {maximum} model iterations")]
@@ -101,6 +103,7 @@ pub struct AgentRuntime {
     observers: Vec<Arc<dyn EventObserver>>,
     model_observer: Option<Arc<dyn ModelProgressObserver>>,
     config: RuntimeConfig,
+    task_budget: Option<TaskBudget>,
     active_threads: Mutex<BTreeSet<ThreadId>>,
 }
 
@@ -127,6 +130,7 @@ impl AgentRuntime {
             observers: Vec::new(),
             model_observer: None,
             config: RuntimeConfig::default(),
+            task_budget: None,
             active_threads: Mutex::new(BTreeSet::new()),
         }
     }
@@ -176,6 +180,13 @@ impl AgentRuntime {
     #[must_use]
     pub fn with_model_observer(mut self, observer: Arc<dyn ModelProgressObserver>) -> Self {
         self.model_observer = Some(observer);
+        self
+    }
+
+    /// Scope this runtime to one task when installing a shared time budget.
+    #[must_use]
+    pub fn with_task_budget(mut self, budget: TaskBudget) -> Self {
+        self.task_budget = Some(budget);
         self
     }
 
@@ -256,6 +267,7 @@ impl AgentRuntime {
     ) -> Result<TurnOutcome, RuntimeError> {
         self.ensure_thread(thread_id)?;
         let _active = self.acquire_thread(thread_id)?;
+        let cancellation = cancellation.with_task_budget(self.task_budget.clone());
         self.ensure_turn_unused(thread_id, &turn_id)?;
         self.recover_exclusive(thread_id)?;
 
@@ -283,7 +295,7 @@ impl AgentRuntime {
 
         for iteration in 0..self.config.max_model_iterations {
             if cancellation.is_cancelled() {
-                return self.cancel_turn(thread_id, &turn_id, &[]);
+                return self.cancel_turn(thread_id, &turn_id, &cancellation, &[]);
             }
 
             let compiled = match self.compiler.compile(ContextInput {
@@ -319,6 +331,9 @@ impl AgentRuntime {
                     visible_tools: visible_names.clone(),
                 },
             )?;
+            if cancellation.is_cancelled() {
+                return self.cancel_turn(thread_id, &turn_id, &cancellation, &[]);
+            }
             self.append(
                 thread_id.clone(),
                 Some(turn_id.clone()),
@@ -345,7 +360,7 @@ impl AgentRuntime {
                 Ok(response) => response,
                 Err(error) => {
                     if cancellation.is_cancelled() {
-                        return self.cancel_turn(thread_id, &turn_id, &[]);
+                        return self.cancel_turn(thread_id, &turn_id, &cancellation, &[]);
                     }
                     self.fail_turn(thread_id, &turn_id, error.to_string())?;
                     return Err(error.into());
@@ -415,7 +430,7 @@ impl AgentRuntime {
             }
 
             if cancellation.is_cancelled() {
-                return self.cancel_turn(thread_id, &turn_id, &response.tool_calls);
+                return self.cancel_turn(thread_id, &turn_id, &cancellation, &response.tool_calls);
             }
 
             if response.tool_calls.is_empty() {
@@ -436,7 +451,12 @@ impl AgentRuntime {
 
             for (index, call) in response.tool_calls.iter().enumerate() {
                 if cancellation.is_cancelled() {
-                    return self.cancel_turn(thread_id, &turn_id, &response.tool_calls[index..]);
+                    return self.cancel_turn(
+                        thread_id,
+                        &turn_id,
+                        &cancellation,
+                        &response.tool_calls[index..],
+                    );
                 }
                 let receipt = self
                     .handle_tool_call(
@@ -449,6 +469,9 @@ impl AgentRuntime {
                     )
                     .await?;
                 transcript.push(TranscriptMessage::Tool { receipt });
+            }
+            if cancellation.is_cancelled() {
+                return self.cancel_turn(thread_id, &turn_id, &cancellation, &[]);
             }
         }
 
@@ -595,6 +618,11 @@ impl AgentRuntime {
             }
         }
 
+        if execution_context.cancellation.is_cancelled() {
+            let receipt = ToolReceipt::failed(prepared, "turn stopped before execution began");
+            self.record_receipt(thread_id, turn_id, receipt.clone(), false)?;
+            return Ok(receipt);
+        }
         self.append(
             thread_id.clone(),
             Some(turn_id.clone()),
@@ -674,6 +702,7 @@ impl AgentRuntime {
         &self,
         thread_id: &ThreadId,
         turn_id: &TurnId,
+        cancellation: &CancellationToken,
         unhandled_calls: &[ToolCall],
     ) -> Result<T, RuntimeError> {
         for call in unhandled_calls {
@@ -684,6 +713,11 @@ impl AgentRuntime {
                 "turn was cancelled before tool preparation",
             );
             self.record_receipt(thread_id, turn_id, receipt, false)?;
+        }
+        if cancellation.generation_expired() {
+            let error = TaskBudgetError::GenerationTime;
+            self.fail_turn(thread_id, turn_id, error.to_string())?;
+            return Err(error.into());
         }
         self.append(
             thread_id.clone(),

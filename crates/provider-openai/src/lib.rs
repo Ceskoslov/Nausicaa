@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use agent_harness_core::{
     BoxFuture, CallId, CancellationToken, ModelAdapter, ModelControl, ModelError, ModelProgress,
-    ModelRequest, ModelResponse, RequestTimings, StopReason, TokenUsage, ToolCall,
+    ModelRequest, ModelResponse, RequestTimings, StopReason, TaskBudget, TokenUsage, ToolCall,
     TranscriptMessage,
 };
 use serde_json::{Map, Value, json};
@@ -169,6 +169,7 @@ pub struct OpenAiCompatibleAdapter {
     config: OpenAiConfig,
     transport: Transport,
     request_budget: Option<(RequestBudget, Arc<dyn RequestTokenCounter>)>,
+    task_budget: Option<TaskBudget>,
 }
 
 /// Input and reserved output must fit this model's context window. This is a
@@ -194,6 +195,7 @@ impl OpenAiCompatibleAdapter {
             config,
             transport: Transport::Blocking(transport),
             request_budget: None,
+            task_budget: None,
             streaming: false,
         }
     }
@@ -206,6 +208,7 @@ impl OpenAiCompatibleAdapter {
             config,
             transport: Transport::Async(transport),
             request_budget: None,
+            task_budget: None,
             streaming: false,
         }
     }
@@ -233,6 +236,18 @@ impl OpenAiCompatibleAdapter {
             ));
         }
         self.request_budget = Some((budget, counter));
+        Ok(self)
+    }
+
+    /// Charge this task budget using the existing final-request token counter.
+    pub fn with_task_budget(mut self, budget: TaskBudget) -> Result<Self, ModelError> {
+        if self.request_budget.is_none() {
+            return Err(ModelError::new(
+                "task token budget requires a final-request token counter",
+                false,
+            ));
+        }
+        self.task_budget = Some(budget);
         Ok(self)
     }
 
@@ -335,17 +350,19 @@ impl OpenAiCompatibleAdapter {
                     false,
                 ));
             }
-            if let Some(cap) = modern.or(legacy) {
-                if !matches!(cap.as_u64(), Some(value) if value > 0 && value <= budget.reserved_output_tokens)
-                {
-                    return Err(ModelError::new(
-                        "output token cap must be positive and within the reservation",
-                        false,
-                    ));
-                }
+            let output_cap = if let Some(cap) = modern.or(legacy) {
+                cap.as_u64()
+                    .filter(|&value| value > 0 && value <= budget.reserved_output_tokens)
+                    .ok_or_else(|| {
+                        ModelError::new(
+                            "output token cap must be positive and within the reservation",
+                            false,
+                        )
+                    })?
             } else {
                 body["max_completion_tokens"] = json!(budget.reserved_output_tokens);
-            }
+                budget.reserved_output_tokens
+            };
             let input = counter
                 .count_input_tokens(&body)
                 .map_err(|error| ModelError::new(error.message, false))?;
@@ -357,6 +374,11 @@ impl OpenAiCompatibleAdapter {
                     ),
                     false,
                 ));
+            }
+            if let Some(task_budget) = &self.task_budget {
+                task_budget
+                    .charge_request(input, output_cap)
+                    .map_err(|error| ModelError::new(error.to_string(), false))?;
             }
         }
         let mut headers =
@@ -388,6 +410,11 @@ impl OpenAiCompatibleAdapter {
                 false,
             ));
         };
+        if self.task_budget.is_some() {
+            control
+                .check()
+                .map_err(|error| ModelError::new(error.to_string(), false))?;
+        }
         let response = transport
             .post_json_controlled(self.http_request(request)?, control, on_text, timings)
             .map_err(|error| ModelError::new(error.to_string(), true))?;
@@ -761,6 +788,44 @@ mod tests {
                 .retryable
         );
         assert!(transport.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn cumulative_budget_keeps_charges_when_transport_fails() {
+        struct FixedCounter;
+        impl RequestTokenCounter for FixedCounter {
+            fn count_input_tokens(&self, _: &Value) -> Result<u64, ModelError> {
+                Ok(4)
+            }
+        }
+        struct FailingTransport;
+        impl HttpTransport for FailingTransport {
+            fn post_json(&self, _: HttpRequest) -> Result<HttpResponse, TransportError> {
+                Err(TransportError::Io("fixture transport failure".into()))
+            }
+        }
+        use std::time::Duration;
+        let budget = TaskBudget::new(Duration::from_secs(60), Duration::from_secs(10), 12).unwrap();
+        let mut config = OpenAiConfig::new("http://example.invalid", "test");
+        config.extra_body.insert("max_tokens".into(), json!(2));
+        let adapter = OpenAiCompatibleAdapter::new(config, Arc::new(FailingTransport))
+            .with_request_budget(
+                RequestBudget {
+                    context_window_tokens: 100,
+                    reserved_output_tokens: 10,
+                },
+                Arc::new(FixedCounter),
+            )
+            .unwrap()
+            .with_task_budget(budget.clone())
+            .unwrap();
+        for remaining in [6, 0] {
+            assert!(block_on(adapter.complete(budget_request())).is_err());
+            assert_eq!(budget.remaining_tokens(), remaining);
+        }
+        let error = block_on(adapter.complete(budget_request())).unwrap_err();
+        assert_eq!(error.message, "task generation token budget exhausted");
+        assert!(!error.retryable);
     }
 
     #[test]

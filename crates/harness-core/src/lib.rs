@@ -26,7 +26,7 @@ pub use context::{
     CompiledContext, ContextCompiler, ContextError, ContextInput, DirectoryRuleLoader,
     LayeredContextCompiler, PromptLayer, PromptSegment,
 };
-pub use control::CancellationToken;
+pub use control::{CancellationToken, TaskBudget, TaskBudgetError};
 pub use event::{EventEnvelope, EventObserver, HookPoint, RuntimeEvent};
 pub use executor::{DirectExecutor, RejectingExecutor, ToolExecutor};
 pub use hook::{Hook, HookContext, HookError, HookSet};

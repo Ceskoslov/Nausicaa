@@ -516,3 +516,21 @@ Tests run against bounded local servers on a single-thread Tokio executor and
 retain existing default-transport regression coverage. The committed dependency
 lockfile is tested on Rust 1.85; it holds `idna_adapter` at 1.2.0 to avoid a
 transitive derive release that actually required newer Rust despite its metadata.
+
+## Cumulative task budgeting
+
+For an opt-in task, the host shares one `TaskBudget` with its runtime and
+OpenAI-compatible adapter for all generation and repair turns. The monotonic
+generation deadline leaves a separate time window for host-side verification.
+The host caps its verifier using the remaining verification duration. Runtime
+checks and built-in cooperative cancellation apply the generation deadline;
+legacy blocking model, approval, or execution implementations can delay return.
+The runtime closes accepted calls before ending the turn.
+
+The adapter charges counted final input plus the effective output cap just
+before handing a request to transport. It retains every admitted reservation,
+including on failure, and never depends on potentially absent billing usage.
+The host must install a model-specific final-request counter. Budget state
+is in-process. If the host loses the state during a restart, it must block
+further generation for that task until it can reconcile its budget. The
+attempt-only journal and its version-1 data continue to use their existing API.
