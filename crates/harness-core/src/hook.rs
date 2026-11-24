@@ -71,6 +71,10 @@ impl HookSet {
         self.hooks.push(hook);
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.hooks.is_empty()
+    }
+
     pub(crate) fn before_model(
         &self,
         context: &HookContext,

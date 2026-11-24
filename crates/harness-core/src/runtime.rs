@@ -17,6 +17,7 @@ use crate::model::{
 use crate::policy::{CapabilityProjection, PolicyContext, ToolPolicy, project_capabilities};
 use crate::protocol::{ToolCall, ToolReceipt, TranscriptMessage};
 use crate::recovery::{RecoveryReport, recover_thread};
+use crate::resume::{ModelBoundary, RESUME_VERSION, model_boundary};
 use crate::retry::{ModelRetryPolicy, RetryTimer, wait_for_retry};
 use crate::store::{ActiveThread, EventStore, StoreError, ThreadGuards};
 use crate::tool::{ToolExecutionContext, ToolRegistry};
@@ -60,6 +61,11 @@ pub enum RuntimeError {
     UnknownThread(ThreadId),
     #[error("thread `{0}` already has an active turn")]
     ConcurrentTurn(ThreadId),
+    #[error("turn `{turn_id}` cannot be resumed: {reason}")]
+    TurnNotResumable {
+        turn_id: TurnId,
+        reason: &'static str,
+    },
     #[error("turn `{turn_id}` already exists in thread `{thread_id}`")]
     DuplicateTurn {
         thread_id: ThreadId,
@@ -285,13 +291,80 @@ impl AgentRuntime {
         input: impl Into<String>,
         cancellation: CancellationToken,
     ) -> Result<TurnOutcome, RuntimeError> {
+        self.start_turn(thread_id, turn_id, input.into(), cancellation, false)
+            .await
+    }
+
+    /// Start a turn that can later resume at a durable model request boundary.
+    /// Version 1 excludes runtime hooks and process-local task budgets.
+    pub async fn run_resumable_turn(
+        &self,
+        thread_id: &ThreadId,
+        turn_id: TurnId,
+        input: impl Into<String>,
+        cancellation: CancellationToken,
+    ) -> Result<TurnOutcome, RuntimeError> {
+        self.ensure_resumable_runtime(&turn_id)?;
+        self.start_turn(thread_id, turn_id, input.into(), cancellation, true)
+            .await
+    }
+
+    /// Explicitly continue the latest resumable turn from its durable boundary.
+    /// The host supplies the current authorized runtime configuration.
+    pub async fn resume_turn(
+        &self,
+        thread_id: &ThreadId,
+        turn_id: TurnId,
+        cancellation: CancellationToken,
+    ) -> Result<TurnOutcome, RuntimeError> {
+        self.ensure_resumable_runtime(&turn_id)?;
+        self.ensure_thread(thread_id)?;
+        let _active = self.acquire_thread(thread_id)?;
+        let events = self.store.load_thread(thread_id)?;
+        let mut boundary =
+            model_boundary(&events, &turn_id).map_err(|reason| RuntimeError::TurnNotResumable {
+                turn_id: turn_id.clone(),
+                reason,
+            })?;
+        boundary.max_iterations = boundary
+            .max_iterations
+            .min(self.config.max_model_iterations);
+        self.append(
+            thread_id.clone(),
+            Some(turn_id.clone()),
+            RuntimeEvent::TurnResumed {
+                iteration: boundary.next_iteration,
+            },
+        )?;
+        let transcript = transcript_from_events(&events);
+        drop(events);
+        self.run_model_loop(thread_id, turn_id, cancellation, boundary, transcript)
+            .await
+    }
+
+    fn ensure_resumable_runtime(&self, turn_id: &TurnId) -> Result<(), RuntimeError> {
+        if self.task_budget.is_some() || !self.hooks.is_empty() {
+            return Err(RuntimeError::TurnNotResumable {
+                turn_id: turn_id.clone(),
+                reason: "version 1 requires a runtime without hooks or a process-local task budget",
+            });
+        }
+        Ok(())
+    }
+
+    async fn start_turn(
+        &self,
+        thread_id: &ThreadId,
+        turn_id: TurnId,
+        input: String,
+        cancellation: CancellationToken,
+        resumable: bool,
+    ) -> Result<TurnOutcome, RuntimeError> {
         self.ensure_thread(thread_id)?;
         let _active = self.acquire_thread(thread_id)?;
         let cancellation = cancellation.with_task_budget(self.task_budget.clone());
         self.ensure_turn_unused(thread_id, &turn_id)?;
         self.recover_exclusive(thread_id)?;
-
-        let input = input.into();
         self.append(
             thread_id.clone(),
             Some(turn_id.clone()),
@@ -300,20 +373,45 @@ impl AgentRuntime {
         self.append(
             thread_id.clone(),
             Some(turn_id.clone()),
-            RuntimeEvent::UserMessage {
-                content: input.clone(),
-            },
+            RuntimeEvent::UserMessage { content: input },
         )?;
+        if resumable {
+            self.append(
+                thread_id.clone(),
+                Some(turn_id.clone()),
+                RuntimeEvent::TurnResumable {
+                    version: RESUME_VERSION,
+                    max_model_iterations: self.config.max_model_iterations,
+                },
+            )?;
+        }
+        let transcript = transcript_from_events(&self.store.load_thread(thread_id)?);
+        self.run_model_loop(
+            thread_id,
+            turn_id,
+            cancellation,
+            ModelBoundary::initial(self.config.max_model_iterations),
+            transcript,
+        )
+        .await
+    }
 
-        let mut transcript = transcript_from_events(&self.store.load_thread(thread_id)?);
+    async fn run_model_loop(
+        &self,
+        thread_id: &ThreadId,
+        turn_id: TurnId,
+        cancellation: CancellationToken,
+        boundary: ModelBoundary,
+        mut transcript: Vec<TranscriptMessage>,
+    ) -> Result<TurnOutcome, RuntimeError> {
         let capabilities = self.capabilities();
         let visible_names: Vec<String> = capabilities.visible_names().map(str::to_owned).collect();
         let visible_tools = self
             .tools
             .definitions_for(visible_names.iter().map(String::as_str));
-        let mut seen_call_ids = BTreeSet::<CallId>::new();
+        let mut seen_call_ids = boundary.seen_call_ids;
 
-        for iteration in 0..self.config.max_model_iterations {
+        for iteration in boundary.next_iteration..boundary.max_iterations {
             if cancellation.is_cancelled() {
                 return self.cancel_turn(thread_id, &turn_id, &cancellation, &[]);
             }
@@ -354,11 +452,14 @@ impl AgentRuntime {
             if cancellation.is_cancelled() {
                 return self.cancel_turn(thread_id, &turn_id, &cancellation, &[]);
             }
-            self.append(
-                thread_id.clone(),
-                Some(turn_id.clone()),
-                RuntimeEvent::ModelRequestStarted { iteration },
-            )?;
+            let pending_request = iteration == boundary.next_iteration && boundary.request_started;
+            if !pending_request {
+                self.append(
+                    thread_id.clone(),
+                    Some(turn_id.clone()),
+                    RuntimeEvent::ModelRequestStarted { iteration },
+                )?;
+            }
 
             let request = ModelRequest {
                 thread_id: thread_id.clone(),
@@ -367,12 +468,16 @@ impl AgentRuntime {
                 context: compiled,
                 tools: visible_tools.clone(),
             };
-            let mut retries = 0;
-            let mut delay = self
-                .model_retry
-                .as_ref()
-                .map(|(policy, _)| policy.initial_delay());
+            let mut retries = if pending_request { boundary.retries } else { 0 };
+            let mut delay = self.model_retry.as_ref().map(|(policy, _)| {
+                // Even a one-nanosecond delay saturates Duration before 128 doublings.
+                (0..retries.min(128))
+                    .fold(policy.initial_delay(), |delay, _| policy.next_delay(delay))
+            });
             let response = loop {
+                if cancellation.is_cancelled() {
+                    return self.cancel_turn(thread_id, &turn_id, &cancellation, &[]);
+                }
                 let error = match self
                     .model
                     .complete_controlled(
@@ -532,12 +637,12 @@ impl AgentRuntime {
             &turn_id,
             format!(
                 "maximum model iterations ({}) exceeded",
-                self.config.max_model_iterations
+                boundary.max_iterations
             ),
         )?;
         Err(RuntimeError::MaxModelIterations {
             turn_id,
-            maximum: self.config.max_model_iterations,
+            maximum: boundary.max_iterations,
         })
     }
 

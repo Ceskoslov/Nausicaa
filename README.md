@@ -531,9 +531,18 @@ Recovery deliberately closes incomplete protocol edges without replaying side ef
 
 Every interrupted open turn is then marked failed. `run_turn` performs recovery before starting new work on the thread, and callers can invoke recovery explicitly through the core API or app server.
 
-`AgentRuntime::recover` acquires the same per-thread guard as turn execution and returns `ConcurrentTurn` while the thread is active in that runtime. Dropping an interrupted turn future releases the guard and allows recovery. The low-level `recover_thread` function still requires callers to ensure exclusive ownership themselves; separate runtime/store instances need application-level coordination.
+`AgentRuntime::recover` shares the per-thread guard with turn execution,
+including across runtimes backed by the same built-in event store. On Linux
+and macOS a JSONL event store also holds an exclusive advisory file lock until
+close. The lower-level `recover_thread` API requires the caller to ensure
+exclusive ownership.
 
-The JSONL stores synchronize access within one process. They do not implement cross-process locking or distributed consensus.
+Embedders can use `run_resumable_turn` and later `resume_turn` with the original
+thread and turn IDs. Call resume before starting new work on the thread or
+invoking terminal recovery. A durable model boundary can continue under the
+host's current policy. Interrupted approval, incomplete batches and unknown
+receipts require explicit recovery. Version 1 excludes hooks and process-local
+task budgets. The app server and TUI currently expose their existing workflows.
 
 ## JSON-RPC app server
 
@@ -688,7 +697,7 @@ The default adapter path runs curl on a worker thread. Opt into SSE with
 `AgentRuntime::with_model_observer`. Text deltas are unvalidated previews; only a
 complete HTTP response with a finish reason and `[DONE]` becomes a model response.
 Incomplete streams never expose tool fragments to execution. Non-streaming is
-still the adapter default. Automatic retries are not implemented.
+the adapter default. Model retries are opt-in at the runtime boundary.
 
 `ModelAdapter::complete_controlled` accepts cancellation and progress observers;
 its default delegates to legacy `complete`. Curl observes cancellation (including
@@ -698,6 +707,22 @@ Request diagnostics expose DNS, TCP and TLS durations, first-byte and first-text
 elapsed times, and total host elapsed time. First byte includes headers/keepalives;
 it is not first model text or a measurement of upstream queue time. Missing timings
 are unknown, especially on cancellation or transport failure.
+
+### Task budgets and model retries
+
+For one task, create a `TaskBudget` from its total duration, verification
+reserve, and generation token limit. Install the same budget handle with
+`AgentRuntime::with_task_budget` and
+`OpenAiCompatibleAdapter::with_task_budget`. Install the adapter's
+`RequestTokenCounter` first. Use `verification_remaining()` to bound the
+host verifier. Each admitted request reserves counted input and the output
+cap for every requested choice, including when the provider later fails to
+return usage.
+
+Use `AgentRuntime::with_model_retry` to install a `ModelRetryPolicy` and
+a host `RetryTimer`. The runtime retries eligible model errors within the
+same logical iteration. Existing turns remain single-attempt per iteration
+unless the embedding enables the policy.
 
 ### Native asynchronous transport
 
@@ -734,8 +759,8 @@ and native TUI selection are outside this slice.
 Diagnostics retain total and first-text elapsed time. DNS/TCP/TLS and the exact
 first wire-byte time are unavailable and remain `None`; an abandoned future
 reports cancellation with total time and unknown phases. Protocol errors and
-cancellation are nonretryable; I/O errors and HTTP 429/5xx are marked retryable,
-but no automatic retry policy is implemented. HTTP error excerpts are bounded;
+cancellation are nonretryable. I/O errors and HTTP 429/5xx can be retried by
+the opt-in runtime policy. HTTP error excerpts are bounded;
 request URLs are removed from reqwest I/O errors. These are diagnostic changes,
 not durable event/schema migrations. Existing APIs and serialized history remain
 compatible.
@@ -800,7 +825,7 @@ The core integration tests cover capability restriction, exact-action approval, 
 - The task ledger has recovery semantics but no resident gateway, routing layer, or distributed worker implementation.
 - Parent/child capability intersection is implemented, but a complete subagent/worktree scheduler is not included.
 - Workspace path and symlink validation are defense-in-depth checks, not substitutes for a process sandbox.
-- Rust 1.85.0 is verified locally on Linux; the configured macOS CI matrix still needs hosted execution evidence. Windows is not in the initial matrix.
+- Rust 1.85.0 is verified locally on Linux. The hosted matrix tests Linux and macOS with Rust 1.85.0 and stable. [GitHub Actions results](https://github.com/Ceskoslov/Nausicaa/actions/workflows/ci.yml)
 
 ## Repository layout
 

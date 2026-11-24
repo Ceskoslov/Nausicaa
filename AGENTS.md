@@ -32,8 +32,9 @@ loader discovers it. Do not maintain a second, conflicting `AGENT.md`.
    IDs are rejected before the assistant response enters the transcript.
 6. An unknown side-effect outcome stays unknown until reconciled. Never retry
    an external action solely because its receipt is missing.
-7. Serialize turn execution and explicit recovery for a thread. The current
-   guard covers one runtime instance, not multiple processes or instances.
+7. Serialize turn execution, explicit recovery, and resumption for a thread.
+   Built-in stores share the guard across runtimes. On Linux and macOS, the
+   JSONL event log also has one cooperating file owner.
 8. `TurnCompleted` means a normal model turn ended. It does not prove the user's
    task passed an independent acceptance check. Truncation is not completion.
 9. Worker results and heartbeats require a current lease owner/attempt and

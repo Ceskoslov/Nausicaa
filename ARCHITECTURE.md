@@ -141,6 +141,29 @@ at the same inode, as older binaries and tools writing directly can bypass the
 lock. Other platforms and custom stores must coordinate ownership with the host.
 JSONL history remains in memory and the lock is local to the file.
 
+### Explicit model-boundary resumption
+
+`run_resumable_turn` records `turn_resumable` version 1 after durable user
+input. After restart, the host can call `resume_turn` before starting another
+turn or performing terminal recovery. It checks the latest turn under the
+same ownership guard and records `turn_resumed` before entering the model
+loop. The supported boundaries are durable input before model response
+acceptance and a complete tool batch whose durable receipts have known
+outcomes. The original identity, iteration cap, accepted call IDs and
+pending model retry count are reconstructed from the log. The current host
+configuration supplies tools, policy and approvals for new work. A resumed
+pending model request may consume provider resources again.
+
+Pending approval, incomplete tool batches, and unknown receipts require
+explicit recovery. The resume call also rejects terminal or unrecognized
+histories. The resumable
+runtime excludes hooks because a crash after a receipt can leave post-tool
+hook completion ambiguous. It also excludes process-local task budgets,
+whose reservations and deadlines cannot be reconstructed from the log.
+Older logs open without rewriting and keep their existing recovery semantics.
+Upgrade readers before writing the new opt-in event types. No service
+automatically resumes a turn.
+
 ## Background tasks and leases
 
 [JsonlTaskLedger](crates/task-ledger/src/lib.rs) stores a separate event history.
@@ -174,9 +197,10 @@ within a turn. Its bounded snapshot cache is not a persistent task checkpoint.
 No code path grants policy authority to recalled text.
 
 `ModelAdapter` returns a complete response. The included adapter supports optional
-SSE Chat Completions through supervised curl. Model errors carry a retryable
-flag, but the runtime does not implement automatic retries. An optional provider request budget now accounts for the final body using a
-host-supplied model-specific counter; no cumulative task token/cost budget exists.
+SSE Chat Completions through supervised curl or the native transport. The
+runtime supports opt-in retries of eligible model errors. The optional provider
+request and cumulative task budgets account for the final body using a
+host-supplied model-specific counter.
 
 The app server stores turn-control/status entries in memory; durable events do not
 automatically reconstruct that table. The TUI starts a new thread on startup and
@@ -257,6 +281,13 @@ artifacts and change no existing durable formats. Package version plus retained
 fixture/configuration bytes identify the baseline; hosts should also retain their
 checkout revision when comparing locally modified builds.
 
+
+The opt-in scripted Rust behavior suite uses the same evaluation loop with
+a host verifier. It compiles a fresh retained source snapshot with fixed host
+assertions and records bounded process results. The model cannot write the
+verdict artifact. The verifier supplies that artifact to the existing
+exact-content gate, so the journal stays at version 1 and replay uses retained
+evidence. The new mode accepts only built-in scripted fixtures.
 
 ## Final request accounting and pinned task context
 
@@ -530,8 +561,8 @@ checks and built-in cooperative cancellation apply the generation deadline;
 legacy blocking model, approval, or execution implementations can delay return.
 The runtime closes accepted calls before ending the turn.
 
-The adapter charges counted final input plus the effective output cap just
-before handing a request to transport. It retains every admitted reservation,
+The adapter charges counted final input plus the effective output cap for
+every requested choice just before handing a request to transport. It retains every admitted reservation,
 including on failure, and never depends on potentially absent billing usage.
 The host must install a model-specific final-request counter. Budget state
 is in-process. If the host loses the state during a restart, it must block
@@ -555,10 +586,3 @@ paths. Tool execution remains outside the retry loop.
 enabling retries, because older readers do not recognize retry events. Existing
 logs require no rewrite. A failed or interrupted model request may still have
 consumed provider resources.
-
-The opt-in scripted Rust behavior suite uses the same evaluation loop with
-a host verifier. It compiles a fresh retained source snapshot with fixed host
-assertions and records bounded process results. The model cannot write the
-verdict artifact. The verifier supplies that artifact to the existing
-exact-content gate, so the journal stays at version 1 and replay uses retained
-evidence. The new mode accepts only built-in scripted fixtures.

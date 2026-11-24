@@ -18,6 +18,13 @@ pub enum HookPoint {
 pub enum RuntimeEvent {
     ThreadStarted,
     TurnStarted,
+    TurnResumable {
+        version: u32,
+        max_model_iterations: usize,
+    },
+    TurnResumed {
+        iteration: usize,
+    },
     UserMessage {
         content: String,
     },

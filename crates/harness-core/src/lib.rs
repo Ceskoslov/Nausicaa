@@ -15,6 +15,7 @@ pub mod model;
 pub mod policy;
 pub mod protocol;
 pub mod recovery;
+mod resume;
 pub mod retry;
 pub mod runtime;
 pub mod store;

@@ -155,8 +155,8 @@ impl ApprovalProvider for MismatchedApprovals {
 }
 
 fn runtime(
-    model: Arc<ScriptedModel>,
-    store: Arc<MemoryEventStore>,
+    model: Arc<dyn ModelAdapter>,
+    store: Arc<dyn EventStore>,
     policy: CapabilityPolicy,
     executions: Arc<AtomicUsize>,
 ) -> AgentRuntime {
@@ -681,4 +681,359 @@ fn retry_exhaustion_and_backoff_cancellation_end_the_turn() {
             assert_eq!(model.requests().len(), 2);
         }
     }
+}
+
+struct ResumeJournal(std::path::PathBuf);
+
+impl ResumeJournal {
+    fn new() -> Self {
+        let directory = std::env::temp_dir().join(format!("nausicaa-resume-{}", TurnId::new()));
+        std::fs::create_dir(&directory).unwrap();
+        Self(directory)
+    }
+
+    fn open(&self) -> agent_harness_core::JsonlEventStore {
+        agent_harness_core::JsonlEventStore::open(self.0.join("events.jsonl")).unwrap()
+    }
+}
+
+impl Drop for ResumeJournal {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn resume_reopens_model_request_without_duplicating_input() {
+    use agent_harness_core::CancellationToken;
+
+    let journal = ResumeJournal::new();
+    let turn = TurnId::new();
+    let thread = {
+        let runtime = runtime(
+            Arc::new(PendingModel),
+            Arc::new(journal.open()),
+            CapabilityPolicy::deny_by_default(),
+            Arc::default(),
+        );
+        let thread = runtime.start_thread().unwrap();
+        {
+            let mut future = std::pin::pin!(runtime.run_resumable_turn(
+                &thread,
+                turn.clone(),
+                "original",
+                CancellationToken::new()
+            ));
+            assert!(
+                future
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+        }
+        thread
+    };
+
+    let model = Arc::new(ScriptedModel::new([ModelResponse::text("done")]));
+    let runtime = runtime(
+        model.clone(),
+        Arc::new(journal.open()),
+        CapabilityPolicy::deny_by_default(),
+        Arc::default(),
+    );
+    let outcome =
+        block_on(runtime.resume_turn(&thread, turn.clone(), CancellationToken::new())).unwrap();
+    assert_eq!(outcome.turn_id, turn);
+    assert_eq!(outcome.model_iterations, 1);
+    let requests = model.requests();
+    assert_eq!(
+        requests[0].context.messages,
+        vec![TranscriptMessage::User {
+            content: "original".into()
+        }]
+    );
+    let events = runtime.events(&thread).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e.event, RuntimeEvent::ModelRequestStarted { .. }))
+            .count(),
+        1
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e.event, RuntimeEvent::TurnResumed { iteration: 0 }))
+    );
+    assert!(matches!(
+        block_on(runtime.resume_turn(&thread, turn, CancellationToken::new())),
+        Err(RuntimeError::TurnNotResumable { .. })
+    ));
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CrashBoundary {
+    Approval,
+    Execution,
+    BeforeReceipt,
+    AfterReceipt,
+}
+
+struct PendingApproval;
+
+impl ApprovalProvider for PendingApproval {
+    fn request<'a>(
+        &'a self,
+        _: ApprovalRequest,
+    ) -> BoxFuture<'a, Result<ApprovalDecision, ApprovalError>> {
+        Box::pin(std::future::pending())
+    }
+}
+
+struct PendingExecution;
+
+impl agent_harness_core::ToolExecutor for PendingExecution {
+    fn execute<'a>(
+        &'a self,
+        _: Arc<dyn Tool>,
+        _: PreparedToolCall,
+        _: ToolExecutionContext,
+    ) -> BoxFuture<'a, Result<ToolOutput, ToolError>> {
+        Box::pin(std::future::pending())
+    }
+}
+
+struct FaultyResumeStore(agent_harness_core::JsonlEventStore, CrashBoundary);
+
+impl EventStore for FaultyResumeStore {
+    fn append(
+        &self,
+        thread_id: ThreadId,
+        turn_id: Option<TurnId>,
+        event: RuntimeEvent,
+    ) -> Result<agent_harness_core::EventEnvelope, agent_harness_core::StoreError> {
+        let fail = matches!(
+            (self.1, &event),
+            (
+                CrashBoundary::BeforeReceipt,
+                RuntimeEvent::ToolReceiptRecorded { .. }
+            ) | (
+                CrashBoundary::AfterReceipt,
+                RuntimeEvent::ContextCompiled { iteration: 1, .. }
+            )
+        );
+        if fail {
+            return Err(agent_harness_core::StoreError::Io(
+                "injected append failure".into(),
+            ));
+        }
+        self.0.append(thread_id, turn_id, event)
+    }
+
+    fn load_thread(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Vec<agent_harness_core::EventEnvelope>, agent_harness_core::StoreError> {
+        self.0.load_thread(thread_id)
+    }
+
+    fn thread_guards(&self) -> Option<&agent_harness_core::store::ThreadGuards> {
+        self.0.thread_guards()
+    }
+}
+
+#[test]
+fn restart_closes_incomplete_tool_boundaries_and_resumes_durable_receipts() {
+    use agent_harness_core::CancellationToken;
+
+    for boundary in [
+        CrashBoundary::Approval,
+        CrashBoundary::Execution,
+        CrashBoundary::BeforeReceipt,
+        CrashBoundary::AfterReceipt,
+    ] {
+        let journal = ResumeJournal::new();
+        let turn = TurnId::new();
+        let executions = Arc::new(AtomicUsize::new(0));
+        let call = ToolCall::new("echo", json!({"message": "one effect"}));
+        let thread = {
+            let model = Arc::new(ScriptedModel::new([ModelResponse::tool_calls(vec![
+                call.clone(),
+            ])]));
+            let store = Arc::new(FaultyResumeStore(journal.open(), boundary));
+            let approval = matches!(boundary, CrashBoundary::Approval);
+            let mut runtime = runtime(
+                model,
+                store,
+                CapabilityPolicy::deny_by_default()
+                    .grant("echo", if approval { Access::Ask } else { Access::Allow }),
+                executions.clone(),
+            );
+            if approval {
+                runtime = runtime.with_approval_provider(Arc::new(PendingApproval));
+            } else if matches!(boundary, CrashBoundary::Execution) {
+                runtime = runtime.with_executor(Arc::new(PendingExecution));
+            }
+            let thread = runtime.start_thread().unwrap();
+            {
+                let mut future = std::pin::pin!(runtime.run_resumable_turn(
+                    &thread,
+                    turn.clone(),
+                    "echo once",
+                    CancellationToken::new()
+                ));
+                let result = future
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()));
+                match boundary {
+                    CrashBoundary::Approval | CrashBoundary::Execution => {
+                        assert!(result.is_pending())
+                    }
+                    CrashBoundary::BeforeReceipt => assert!(matches!(
+                        result,
+                        Poll::Ready(Err(RuntimeError::ReceiptPersistenceUnknown { .. }))
+                    )),
+                    CrashBoundary::AfterReceipt => {
+                        assert!(matches!(result, Poll::Ready(Err(RuntimeError::Store(_)))))
+                    }
+                }
+            }
+            thread
+        };
+
+        let model = Arc::new(ScriptedModel::new([ModelResponse::text("done")]));
+        let runtime = runtime(
+            model.clone(),
+            Arc::new(journal.open()),
+            CapabilityPolicy::deny_by_default(),
+            executions.clone(),
+        );
+        let before = runtime.events(&thread).unwrap();
+        let resumed =
+            block_on(runtime.resume_turn(&thread, turn.clone(), CancellationToken::new()));
+        if matches!(boundary, CrashBoundary::AfterReceipt) {
+            assert_eq!(resumed.unwrap().model_iterations, 2);
+            assert_eq!(model.requests()[0].iteration, 1);
+            assert!(model.requests()[0].tools.is_empty());
+            assert!(
+                matches!(model.requests()[0].context.messages.last(), Some(TranscriptMessage::Tool { receipt }) if receipt.call_id == call.id && receipt.status == ReceiptStatus::Succeeded)
+            );
+            assert_eq!(executions.load(Ordering::SeqCst), 1);
+        } else {
+            assert!(
+                matches!(resumed, Err(RuntimeError::TurnNotResumable { .. })),
+                "{boundary:?}"
+            );
+            assert!(model.requests().is_empty());
+            assert_eq!(runtime.events(&thread).unwrap(), before);
+            let recovery = runtime.recover(&thread).unwrap();
+            assert_eq!(recovery.turns_marked_failed, vec![turn]);
+            assert_eq!(recovery.receipts_recorded.len(), 1);
+            let status = if matches!(boundary, CrashBoundary::Approval) {
+                ReceiptStatus::Failed
+            } else {
+                ReceiptStatus::Unknown
+            };
+            assert_eq!(recovery.receipts_recorded[0].status, status);
+            assert_eq!(
+                executions.load(Ordering::SeqCst),
+                usize::from(matches!(boundary, CrashBoundary::BeforeReceipt))
+            );
+            assert!(
+                runtime
+                    .recover(&thread)
+                    .unwrap()
+                    .receipts_recorded
+                    .is_empty()
+            );
+        }
+    }
+}
+
+#[test]
+fn resume_rejects_duplicate_call_id_after_durable_tool_batch() {
+    use agent_harness_core::CancellationToken;
+    let journal = ResumeJournal::new();
+    let turn = TurnId::new();
+    let call = ToolCall::new("echo", json!({"message": "one effect"}));
+    let executions = Arc::new(AtomicUsize::new(0));
+    let policy = CapabilityPolicy::deny_by_default().grant("echo", Access::Allow);
+    let thread = {
+        let first = runtime(
+            Arc::new(ScriptedModel::new([ModelResponse::tool_calls(vec![
+                call.clone(),
+            ])])),
+            Arc::new(FaultyResumeStore(
+                journal.open(),
+                CrashBoundary::AfterReceipt,
+            )),
+            policy.clone(),
+            executions.clone(),
+        );
+        let thread = first.start_thread().unwrap();
+        assert!(
+            block_on(first.run_resumable_turn(
+                &thread,
+                turn.clone(),
+                "echo once",
+                CancellationToken::new()
+            ))
+            .is_err()
+        );
+        thread
+    };
+    let second = runtime(
+        Arc::new(ScriptedModel::new([ModelResponse::tool_calls(vec![call])])),
+        Arc::new(journal.open()),
+        policy,
+        executions.clone(),
+    );
+    assert!(matches!(
+        block_on(second.resume_turn(&thread, turn, CancellationToken::new())),
+        Err(RuntimeError::InvalidModelResponse { .. })
+    ));
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn generation_deadline_during_backoff_preserves_verification_time() {
+    use agent_harness_core::{ModelRetryPolicy, RetryTimer, TaskBudget, TaskBudgetError};
+    use std::time::{Duration, Instant};
+
+    struct TestClock(Arc<Mutex<Instant>>);
+    impl RetryTimer for TestClock {
+        fn sleep(&self, duration: Duration) -> BoxFuture<'_, ()> {
+            Box::pin(async move { *self.0.lock().unwrap() += duration })
+        }
+    }
+
+    let now = Arc::new(Mutex::new(Instant::now()));
+    let budget =
+        TaskBudget::with_clock(Duration::from_millis(30), Duration::from_millis(20), 100, {
+            let now = now.clone();
+            move || *now.lock().unwrap()
+        })
+        .unwrap();
+    let model = Arc::new(ScriptedModel::with_results([Err(ModelError::new(
+        "transient",
+        true,
+    ))]));
+    let runtime = runtime(
+        model.clone(),
+        Arc::new(MemoryEventStore::new()),
+        CapabilityPolicy::deny_by_default(),
+        Arc::default(),
+    )
+    .with_task_budget(budget.clone())
+    .with_model_retry(
+        ModelRetryPolicy::new(3, Duration::from_millis(30), Duration::from_millis(30)).unwrap(),
+        Arc::new(TestClock(now)),
+    );
+    let thread = runtime.start_thread().unwrap();
+    assert!(matches!(
+        block_on(runtime.run_turn(&thread, "bounded work")),
+        Err(RuntimeError::TaskBudget(TaskBudgetError::GenerationTime))
+    ));
+    assert_eq!(model.requests().len(), 1);
+    assert_eq!(budget.verification_remaining(), Duration::from_millis(20));
 }

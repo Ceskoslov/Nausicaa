@@ -25,8 +25,8 @@ Linux with Rust 1.98.0; this is not evidence of cross-platform containment or of
 the manifest's declared Rust 1.85 minimum. Some process tests require local IPC
 facilities unavailable in restricted sandboxes.
 
-Scope boundaries still apply: no cross-instance locking, no automatic task
-resumption, no immediate cancellation of blocking calls, no tail repair in memory
+At this baseline, scope boundaries included no cross-instance locking,
+no automatic task resumption, no immediate cancellation of blocking calls, no tail repair in memory
 or task-ledger stores, and no guaranteed cleanup of local processes that escape
 their process group. See [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -118,9 +118,9 @@ retrieval, and denied access. A combined fixture drops old history and externali
 55 KB of output while retaining task constraints and call/receipt integrity under
 a final-request test-counter budget. This satisfies the Context row at the
 embedding boundary; production model tokenizers, token-driven automatic
-compaction, archive indexing/GC, and cumulative task budgets remain extensions.
-The focused Editing tools slice below is now implemented; the next runtime area
-is Provider/runtime.
+compaction and archive indexing/GC remain extensions. Cumulative task
+budgeting is covered by the Provider/runtime slice below.
+The focused Editing tools slice is implemented below.
 
 **Implemented editing slice (2026-09-21):** optional `register_editing_tools`
 adds `search_files`, `read_file_page`, and `apply_patch` without changing the
@@ -145,7 +145,7 @@ limit, and retained transcript groups. The provider and TUI now support bounded 
 version-1 metrics file, and cancellation of in-flight curl requests. Local HTTP
 tests cover previews before completion, cancellation closing the connection and
 missing stream terminators; UI tests cover stale previews and metric privacy.
-Native async HTTP is now available as the opt-in slice below; automatic retry remains proposed. Built-in shell cancellation
+Native async HTTP and bounded runtime retry are opt-in. Built-in shell cancellation
 is now wired through `run_controlled`: bounded polling, Unix group cleanup and
 unknown-effect receipts are tested. Custom runner interruption remains the
 implementer’s responsibility.
@@ -183,28 +183,40 @@ cancellation, abandonment, incomplete tool calls, HTTP statuses, timeout, limits
 invalid headers, missing runtime and budget rejection. The existing curl/TUI path
 and core's runtime independence are preserved.
 
-This completes the native transport slice only. Automatic retries, cumulative
-time/token budgets and verification reserve remain acceptance work for the
-Provider/runtime row. Native diagnostics cannot measure DNS/TCP/TLS/first-wire-byte
+Native diagnostics cannot measure DNS/TCP/TLS/first-wire-byte
 phases; TLS/live model and hosted platform validation need separate evidence.
 The committed lockfile retains Rust 1.85-compatible transitive dependencies.
 Validation: Linux Rust 1.85.0 and stable each pass 87 unit/integration tests plus
 one compile-only documentation example; one Bubblewrap test is explicitly ignored.
 Strict workspace Clippy, rustfmt, rustdoc and diff checks pass. The minimal facade
-still has no Tokio/reqwest dependency. Hosted/macOS and live TLS runs remain pending.
+still has no Tokio/reqwest dependency. Live TLS validation remains pending.
 
-## Ordered delivery queue (2026-09-21)
+**Budget, retry, and behavior evaluation (2026-11-24):** opt-in cumulative
+generation deadlines and token reservations leave a verification window for
+the trusted host. Bounded model retries preserve iteration and receipt
+ordering. A scripted Rust behavior suite accepts equivalent code and
+measured 2/3 verified successes and one false completion in core-only mode,
+versus 3/3 verified successes and zero false completions with the task layer.
 
-Keep each numbered step independently reviewable. Editing and the local
-maintenance gate are complete; hosted CI results remain pending. Subsequent
-entries remain gated; native async transport is the implemented first slice of step 3.
+**Local persistence (2026-11-24):** local file ownership and shared
+per-thread guards landed with explicit version-1 model-boundary resumption.
+Fault tests reopen journals interrupted at the model, approval, execution
+and receipt boundaries. Pending work requires the existing recovery path,
+which preserves unknown effects. Hooks and process-local task budgets
+are excluded from v1 resumption. Durable approval waiting, execution
+supervision, and client reconnection remain separate work.
+
+## Ordered delivery queue (2026-11-24)
+
+Keep each numbered step independently reviewable. Hosted validation is
+tracked separately from the locally verified feature acceptance.
 
 | Order | Scope and reason | Required evidence before advancing |
 | --- | --- | --- |
 | 1 — completed | Focused editing: the explicit next area after context; enable safe, reviewable coding changes. | Multi-file fixture, stale/ambiguous input rejection, bounded reads/search, unchanged approval and receipt semantics (above). |
 | 2 — implemented; hosted CI pending | Maintenance gate: verify/correct Rust 1.85 support and automate format, Clippy, tests and rustdoc on supported hosts before adding transport dependencies. | Actual minimum-toolchain build/test evidence; CI distinguishes protocol checks from opt-in Bubblewrap containment checks. |
-| 3 — native transport implemented; retries/budgets next | Provider/runtime: opt-in native async transport now complements the worker-thread path; separately add bounded retry of eligible model failures and cumulative time/token budgets with verification reserve. | Prompt cancellation, incomplete streams never execute calls, retries cannot duplicate effects, retry/budget exhaustion deterministically terminates. Preserve current request/stream compatibility. |
-| 4 | Persistence: specify ownership and versioned checkpoints/waiting states before implementing safe resumption. | Fault injection at model, approval, execution-start and receipt boundaries; known-safe continuation and explicit unknown outcomes without action replay; documented migration. |
+| 3 — implemented at the embedding boundary | Provider/runtime: native transport, finite model retries, and cumulative time/token budgets with a verification reserve. | Cancellation, incomplete streams, receipt ordering, and retry/budget exhaustion covered locally. |
+| 4 — local model-boundary slice implemented | Persistence: log ownership and versioned explicit continuation. | Fault injection at model, approval, execution-start and receipt boundaries; safe continuation and recovery without action replay. Durable approval waiting remains pending. |
 | 5 | Execution supervision: durable execution identity/status independent of a model worker, building on ownership/reconciliation rules. | Worker restart reconciles running/completed IDs; cleanup and resource limits remain observable; unknown work is not launched again. |
 | 6 | Control plane: reconstruct durable status and expose resume/delivery workflows over the preceding boundaries. | Client reconnect after restart reports correct task/turn/pending action/delivery state, including unknown effects. |
 | 7 — gated | Measured orchestration/adaptation (stage 4), beginning with independent evaluation. | Named held-out success/false-completion/cost evidence before adding concurrency, dynamic tools or adaptive profiles. |
@@ -247,9 +259,9 @@ and artifact versions must make comparisons reproducible.
 - Implemented: [CI](.github/workflows/ci.yml) runs the documented quality checks
   and configures Linux/macOS with Rust 1.85.0/stable. A manual Bubblewrap lifecycle
   job first probes namespace availability and reports an environment failure
-  explicitly. Local workflow lint and Linux checks passed; hosted/macOS execution
-  evidence remains pending until the workflow runs. Cancellation integration is
-  not proof of complete sandbox containment.
+  explicitly. Local workflow lint and Linux checks passed. See the
+  [hosted workflow results](https://github.com/Ceskoslov/Nausicaa/actions/workflows/ci.yml)
+  for the latest Linux and macOS matrix. The cancellation test covers sandbox lifecycle.
 - Decide whether to share journal recovery across event, task, and memory stores
   or introduce transactional storage. Define schema migration and ownership first.
 - Extend fault injection to append failures, lifecycle boundaries, and worker
