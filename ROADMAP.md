@@ -82,7 +82,7 @@ output only in explicitly authorized stores.
 A and B can branch independently. Land both before C. D can start after A and
 does not depend on the Ohmu pin bump or the behavioral scorer. E is gated by D
 and an operation that needs restart reconciliation. F follows B and C and can
-proceed without D or E. All items below are proposed.
+proceed without D or E. Checked items have local acceptance evidence.
 
 | Step | Owner and likely files | Dependency |
 | --- | --- | --- |
@@ -95,15 +95,15 @@ proceed without D or E. All items below are proposed.
 
 ### A. Test the runtime producer against its evaluator
 
-- [ ] Run the current checkout's exact-content fixture CLI in Nausicaa CI and
-  feed the artifact to a pinned Teto. Keep the existing Teto-owned static
-  producer check as coverage for its supported baseline.
-- [ ] Check both gate directions. Keep reports on holds and errors. Check that
-  the planned denial and unknown interruption retain their receipt expectations,
-  unexpected turn errors fail the integration check, and rescoring identical
-  bytes produces identical reports.
-- [ ] Keep credentials and live endpoints out of this job. Run the existing
-  Rust 1.85 and empty-default-facade checks independently.
+- [x] The [Teto compatibility workflow](.github/workflows/teto.yml) runs the
+  current checkout's exact-content suite against pinned Teto. Teto's own
+  fixed-baseline check remains coverage for that consumer.
+- [x] The workflow archives evidence, checks receipt expectations in both
+  modes, checks release and hold, and compares repeated scores byte for byte.
+  Its scoring step also failed as expected when a local probe injected an
+  unexpected turn error.
+- [x] The compatibility job uses offline fixtures without credentials. The
+  Rust 1.85 and minimal-facade checks remain in the Rust workflow.
 
 ### B. Test the wiki consumer against candidate revisions
 

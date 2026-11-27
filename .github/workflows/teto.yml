@@ -1,0 +1,90 @@
+name: Teto evidence compatibility
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  task-baseline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      EVIDENCE_DIR: ${{ runner.temp }}/teto-evidence
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: Ceskoslov/Teto
+          ref: 38a1256c6b8edbb2f6e2ce2692d6e72d73f41a33
+          path: teto
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: "0.10.10"
+      - name: Prepare locked dependencies
+        run: |
+          rustup toolchain install stable --profile minimal
+          cargo +stable fetch --locked
+          uv sync --directory teto --locked --python 3.13.12
+      - name: Capture offline task evidence
+        run: |
+          mkdir "$EVIDENCE_DIR"
+          {
+            printf 'nausicaa %s\n' "$(git rev-parse HEAD)"
+            printf 'teto %s\n' "$(git -C teto rev-parse HEAD)"
+            rustc +stable --version
+            teto/.venv/bin/python --version
+          } > "$EVIDENCE_DIR/versions.txt"
+          cargo +stable run -p agent-harness-eval --locked --offline \
+            -- --output "$EVIDENCE_DIR/nausicaa"
+      - name: Check receipt evidence and repeatable scoring
+        working-directory: teto
+        run: |
+          summary="$EVIDENCE_DIR/nausicaa/summary.json"
+          for mode in core_only task; do
+            for report in score rescore; do
+              uv run --locked --offline teto score nausicaa --input "$summary" \
+                --mode "$mode" --artifact-id "$mode" --output "$EVIDENCE_DIR/$mode-$report.json"
+            done
+            cmp "$EVIDENCE_DIR/$mode-score.json" "$EVIDENCE_DIR/$mode-rescore.json"
+          done
+
+          python3 - "$EVIDENCE_DIR" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          evidence = Path(sys.argv[1])
+          for mode, verified in (("core_only", 1), ("task", 2)):
+              report = json.loads((evidence / f"{mode}-score.json").read_bytes())
+              assert report["summary"]["verified_success"]["counts"] == {
+                  "pass": verified, "fail": 5 - verified, "unscored": 0, "error": 0,
+              }, mode
+              assert report["summary"]["receipt_expectations"]["counts"] == {
+                  "pass": 5, "fail": 0, "unscored": 0, "error": 0,
+              }, mode
+          PY
+      - name: Check release and hold decisions
+        working-directory: teto
+        run: |
+          summary="$EVIDENCE_DIR/nausicaa/summary.json"
+          for mode in core_only task; do
+            uv run --locked --offline teto import-nausicaa --input "$summary" \
+              --mode "$mode" --artifact-id "$mode" --output "$EVIDENCE_DIR/$mode.json"
+          done
+
+          uv run --locked --offline teto compare --baseline "$EVIDENCE_DIR/core_only.json" \
+            --candidate "$EVIDENCE_DIR/task.json" --output "$EVIDENCE_DIR/release.json"
+          hold_code=0
+          uv run --locked --offline teto compare --baseline "$EVIDENCE_DIR/task.json" \
+            --candidate "$EVIDENCE_DIR/core_only.json" --output "$EVIDENCE_DIR/hold.json" || hold_code=$?
+          test "$hold_code" -eq 1
+      - name: Archive evidence and decisions
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: teto-evidence
+          path: ${{ env.EVIDENCE_DIR }}/
