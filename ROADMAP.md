@@ -1,284 +1,189 @@
 # Nausicaa development roadmap
 
-Baseline: 2026-09-11, reliability commit `8bb9e1e`. This is a development plan,
-not a list of implemented APIs. Development now continues from the task-acceptance, context and focused editing
-baselines; later stages remain gated by their acceptance evidence.
+Nausicaa should be the embeddable runtime for trusted hosts that need tool
+authority, durable receipts, and explicit recovery. Ohmu is the first
+application to use for compatibility checks. Teto consumes evidence and owns
+evaluation and release policy.
 
-## 1. Reliability baseline — completed within the reviewed scope
+Start by testing real producer artifacts against Teto and running the Ohmu
+consumer against candidate Nausicaa revisions. Then make local restart status
+visible to clients. Schedule execution supervision when a concrete operation
+needs to outlive its host.
 
-| Failure | Implemented behavior | Regression coverage |
+## Assessment as of 2026-11-27
+
+| Area | Implemented | Constraint on the next release |
 | --- | --- | --- |
-| Truncated response reported as successful | Validate stop/call contract, retain partial output, deny accepted calls, fail the turn | Abnormal stops with/without calls; normal tool loop remains covered |
-| Explicit recovery fails an active turn | Share the runtime's per-thread guard with execution | Reject recovery without changing events; recover after dropping the turn future |
-| Partial final event blocks all history | Archive an incomplete tail before repairing; preserve a complete record without newline | Replay, append after repair, unchanged corruption rejection |
-| Descendants keep output open after timeout | Unix group cleanup before leader reaping; nonblocking bounded output drain | Timeout, background children, continuous stdout/stderr, externally held writer, normal exit |
-| Wrong or expired worker can finish a task | Require matching worker/attempt and unexpired trusted-host time | Wrong owner/attempt, expiry boundary, heartbeat extension, replay, late results after cancel/recovery |
+| Core, facade, and event storage | Policy projection and effective-access checks, exact prepared-action approval, execution-start and receipt ordering, thread serialization, Unix JSONL ownership, and explicit v1 model-boundary resumption. The facade has no default optional features. | Pending approval, incomplete tool batches, and unknown receipts require explicit recovery. V1 resumption excludes hooks and process-local task budgets. Upgrade readers before writing opt-in resume events. |
+| Task acceptance, ledger, and evaluation | The optional task journal accepts exact retained artifacts. The ledger fences worker results using the live owner, attempt, and expiry. The evaluation crate runs scripted exact-content and Rust behavioral fixtures and retains evidence. | The trusted host captures artifacts and receipts. The task journal and ledger have separate ownership and failure semantics. A normal turn, an accepted task, and a delivered background result are distinct. |
+| Provider, context, and memory | The optional provider supports curl and native async Chat Completions with SSE, request accounting, and opt-in cumulative budgets and bounded model retries. Context can pin task criteria and archive long output. Memory provides advisory lexical recall. | Hosts supply the trusted model token counter. Durable continuation of budgeted work remains open. Ohmu owns its own source retrieval and citations. |
+| Process execution and editing | Bounded workspace reads, exact prepared patches, and cancellation for built-in process runners. Bubblewrap provides opt-in Linux sandboxing. | The process backend has no durable supervisor. Unknown effects require reconciliation. Sandbox containment needs its own validation. |
+| App server, TUI, and CI | JSON-RPC exposes events and recovery. Turn status and cancellation handles live in memory. The TUI starts a fresh thread on startup. Linux CI checks the core and optional crates, including Rust 1.85 support. | Clients lack a restart-facing status contract. Preserve the Linux minimum-toolchain and no-default-feature checks when adding integration jobs. |
 
-Cancellation received during a model call also prevents subsequent successful
-completion. Ledger worker API signatures changed; see the migration example in
-[README.md](README.md#background-task-ledger).
+See the [architecture](ARCHITECTURE.md), [current limitations](README.md#current-limitations),
+and [evaluation guide](crates/eval/README.md) for implementation details and
+historical evidence. The preceding roadmap is available with
+`git show b23edbb:ROADMAP.md`.
 
-Validation at this baseline: 37 workspace tests passed, plus strict Clippy,
-rustfmt, and rustdoc checks. A separate Bubblewrap smoke test verified that a
-new process group is compatible with its `--new-session` setup. The tests ran on
-Linux with Rust 1.98.0; this is not evidence of cross-platform containment or of
-the manifest's declared Rust 1.85 minimum. Some process tests require local IPC
-facilities unavailable in restricted sandboxes.
+### Cross-repository evidence
 
-At this baseline, scope boundaries included no cross-instance locking,
-no automatic task resumption, no immediate cancellation of blocking calls, no tail repair in memory
-or task-ledger stores, and no guaranteed cleanup of local processes that escape
-their process group. See [ARCHITECTURE.md](ARCHITECTURE.md).
+The review used local Nausicaa `b23edbb`, Teto `38a1256` (v0.3.0), and Ohmu
+`8a52985`. Ohmu's manifest and CI pin Nausicaa `a2ab5b3`. Teto's regression
+job already pins `b23edbb` and scores a committed synthetic Ohmu artifact.
 
-## 2. Task acceptance and an evaluation baseline — narrow baseline completed
+- A fresh Nausicaa `task-baseline-v1` run imported into Teto. The paired gate
+  returned `release` for core-only to task mode and `hold` in reverse. Scoring the
+  same task evidence twice produced identical report bytes. The separate Teto
+  scripted suite also ran, scored, and passed its standalone gate.
+- Nausicaa also produced `rust-behavior-v1` evidence. Teto's Nausicaa scorer
+  rejected it as `UNSUPPORTED_NAUSICAA_SUMMARY`. The current importer contract
+  targets the exact-content suite. Teto's standalone Suite v1 runner has its
+  own exact UTF-8 oracle and should not replace the Rust behavioral verifier.
+- Ohmu's temporary-consumer probe compiled against local Nausicaa with one core
+  and one native provider using a workspace-root Cargo patch. This verifies
+  source identity and type compatibility. Runtime behavior under the
+  candidate revision and an update to Ohmu's Git pin remain to be verified.
+- A loopback fixture drove an existing Ohmu build through `ask` and
+  `scripts/evaluate.py`. Teto scored the resulting `evaluation.json` against
+  the original annotations. Host acceptance and abstention passed. Quote
+  verification was unscored because the answer contained no quotes. The probe
+  used a scripted response and a fixture counter. It establishes artifact
+  compatibility for abstention only.
+- Ohmu verifies quote identity against immutable source bytes. Teto uses the
+  host verdict for that check and recomputes expected-source recall and
+  abstention from annotations. Semantic support and contradiction handling need
+  independent labels. The current Ohmu exporter aborts on a failed CLI invocation
+  and retains its journals. A missing case must never improve a release verdict.
 
-**Objective:** distinguish "the model ended a turn" from "the requested work has
-verifiable completion evidence."
+## Ownership and compatibility
 
-Implemented first slice: optional `agent-harness-task` (facade feature `task`)
-provides `TaskSpec`, `CompletionGate`, attempt `Budget`, retained `ArtifactRef`
-snapshots, and a versioned `TaskJournal`. Required exact-content checks fail
-closed; unknown receipts block progress; replay never retries a running attempt.
-The normal embeddable core turn API is unchanged. Six deterministic regression
-tests cover repair, budget exhaustion, receipt retention, interrupted attempts,
-invalid replay, and append failure. `agent-harness-eval` now runs five fixtures
-in isolated directories in both modes, retaining source, events, evidence, and
-metrics. Its separate held-out fixtures cover identity and unknown execution.
-Explicit opt-in live configuration is available but was not run for this baseline.
-
-- Store the objective, explicit acceptance criteria, artifact references,
-  verification evidence, and remaining work independently of chat history.
-- A gate should accept evidence, return actionable repair feedback, or record a
-  blocked/budget-exhausted outcome. It must not create an unlimited retry loop.
-- Introduce an offline evaluation runner with scripted models and isolated task
-  fixtures. Add opt-in pinned live-model runs for measuring actual task quality.
-- Record success, false completion, iterations, time, token usage, interventions,
-  and model/harness configuration. Keep a held-out set for regressions.
-
-**Acceptance:** a task with failing required checks cannot be marked successful;
-passing checks reference inspectable artifacts; repeated failure terminates under
-a budget; denied and unknown actions remain correctly recorded. Demonstrate a
-small coding task that fails verification, is repaired, and then passes. Run the
-same fixtures against the core-only baseline and the task layer.
-
-**Initial decisions:** creation, attempt-start, verification inputs, and explicit
-blocking are durable version-1 task events. The trusted host fixes criteria and
-captures UTF-8 artifacts under logical IDs; complete snapshots are retained inline.
-The gate recomputes exact-content evidence on replay. Repair feedback is advisory
-context supplied by the host. See [ARCHITECTURE.md](ARCHITECTURE.md#task-acceptance).
-The evaluation runner must measure this narrow baseline before broadening it.
-
-**Measured acceptance (2026-09-11):** the coding fixture first fails exact-source
-verification, receives repair feedback, and passes on its second attempt. Repeated
-failure exhausts two attempts. Denied receipts remain denied; interruption yields
-one unknown receipt and blocks further attempts. The paired suite reports 3/5
-false completions under the naive core-turn interpretation and 0/5 with the task
-layer; independently verified success is 1/5 versus 2/5. See the
-[evaluation guide](crates/eval/README.md) for definitions and reproduction.
-
-This completes the deterministic baseline, not general coding evaluation:
-artifacts are UTF-8 snapshots, the oracle is exact content, budgets count attempts,
-and general live model quality has not been established. A completed
-[Nemotron free-route validation](crates/eval/reports/2026-09-11-nemotron-free.md)
-now covers eight live runs: all responses arrived, no exact-content task passed,
-and six generated artifacts passed supplementary compilation/behavior checks.
-Whitespace-only differences, bounded repair failures, and mutable provider routing
-limit the conclusions; this is provider/harness validation, not broad coding
-quality evidence. General semantic checkers, stronger
-artifact retention, and real model comparisons need their own measured changes.
-
-## 3. Sustained execution — context and focused editing baselines implemented
-
-Deliver these as separate reviewable changes, not one large runtime replacement.
-
-| Area | Intended change | Acceptance evidence |
+| Repository | Owns | Integration contract |
 | --- | --- | --- |
-| Context | Account for the final request's token budget, preserve task constraints, externalize long outputs, retrieve evidence on demand | Long-output and compacted-history fixtures retain goals and tool/receipt integrity; final request remains within budget |
-| Editing tools | Add focused search, paginated reads, and patches with explicit conflict checks | Multi-file fixture produces a reviewable patch and detects stale input instead of overwriting it |
-| Provider/runtime | True async transport, streaming events, bounded retry of eligible model errors, time/token budgets | Cancel a pending request promptly; streaming/interrupted responses never execute partial tool calls; retries cannot duplicate tool effects |
-| Persistence | Define checkpoints, durable waiting states, and ownership for resumption | Restart at model/approval/execution/receipt boundaries; resume known-safe work and surface unknown side effects without replay |
-| Execution | Separate execution identity/status from the model worker and supervise long-lived work | Restart the worker and reconcile a running/completed execution using its ID; cleanup and resource limits remain observable |
-| Control plane | Reconstruct status, expose resume, retain delivery state | A client can reconnect after restart and observe the correct task/turn state and pending actions |
+| Nausicaa | Turn and tool protocol, durable execution evidence, host recovery, optional task acceptance, and deterministic runtime fixtures. | Rust core and provider APIs for Ohmu. Existing versioned suite artifacts for Teto. |
+| Ohmu | Markdown content, source revisions and locators, lexical search, snapshots, draft publication and reconciliation, and wiki workflow acceptance. | `ohmu-nausicaa` composes one runtime. `evaluation.json` and the original case annotations go to Teto. |
+| Teto | Suite orchestration, scoring, calibration, release decisions, and any future evaluation job service. | Versioned producer artifacts in. Score reports and gate results out. |
 
-**Implemented context slice:** `TaskContextCompiler` pins the immutable objective
-and required criteria after transcript compaction without altering call/receipt
-groups. `ExternalOutputCompiler` now retains long output in immutable per-thread
-archives, substitutes versioned context references, and offers explicitly
-authorized `read_output` pages. The optional provider `RequestBudget` checks the exact final request using
-a trusted model-specific `RequestTokenCounter`, reserving bounded output capacity
-and rejecting over-budget or uncountable requests before transport. Tool schema
-size and extension fields are covered. Provider extensions can no longer restore
-hidden tools when the core projection is empty.
+Keep adapters in the consumer or the optional evaluation host. Use one Cargo
+source per harness package in an Ohmu host, with portable Git pins for releases
+and workspace-root patches for candidate testing. Keep production evidence in
+producer-owned stores. Pass selected artifacts and digests at the boundary.
+Record the producer, fixture, scorer, and policy revisions used for a decision.
+A scorer verdict grants no tool capability, changes no runtime receipt, and
+authorizes no publication. Wiki content and repair feedback remain advisory.
 
-Focused regression coverage includes compacted-away initial instructions, preserved
-denied call/receipt groups, oversized schemas, exact budget boundaries, invalid
-output caps, counting errors, and extra-body schema injection. Archive tests cover
-Unicode paging, snapshot reuse/conflicts, symlink rejection, exact prepared
-retrieval, and denied access. A combined fixture drops old history and externalizes
-55 KB of output while retaining task constraints and call/receipt integrity under
-a final-request test-counter budget. This satisfies the Context row at the
-embedding boundary; production model tokenizers, token-driven automatic
-compaction and archive indexing/GC remain extensions. Cumulative task
-budgeting is covered by the Provider/runtime slice below.
-The focused Editing tools slice is implemented below.
+Keep v1 journals and evidence readers compatible. When an extension changes the
+meaning of a field or verdict, version that artifact and add a test using an
+older producer. Do not rewrite journals to fit an evaluation schema. Use public
+or synthetic evidence in CI. Retain prompts, private wiki text, and raw tool
+output only in explicitly authorized stores.
 
-**Implemented editing slice (2026-09-21):** optional `register_editing_tools`
-adds `search_files`, `read_file_page`, and `apply_patch` without changing the
-legacy tool registration. Search accepts a bounded list of explicit files;
-pages preserve UTF-8 boundaries and report continuation offsets. A patch requires
-a unique exact old fragment, retains reviewable full before/after snapshots in
-the canonical action, and rejects any content change between preparation and
-execution. The TUI enables readers and requires approval for patches.
+## Delivery order
 
-Seven deterministic regressions cover a multi-file search/read/edit fixture,
-stale and overlapping input, cancellation, changed symlinks, UTF-8 continuation,
-size/search bounds, and runtime policy/default approval rejection with durable
-execution/receipt ordering. This meets the Editing row for a bounded existing-file
-workflow. It does not establish transactional multi-file edits, recursive search,
-snapshot-consistent pages or safety against concurrent external writers. Write
-errors after the effect boundary remain unknown; no action is automatically
-retried. See [editing boundaries](ARCHITECTURE.md#focused-workspace-editing).
+A and B can branch independently. Land both before C. D can start after A and
+does not depend on the Ohmu pin bump or the behavioral scorer. E is gated by D
+and an operation that needs restart reconciliation. F follows B and C and can
+proceed without D or E. All items below are proposed.
 
-**TUI requests, progress and cancellation:** validated CLI/environment settings now expose the
-model request timeout, completion-token cap, temperature, per-turn iteration
-limit, and retained transcript groups. The provider and TUI now support bounded draft text, phase timings with a separate
-version-1 metrics file, and cancellation of in-flight curl requests. Local HTTP
-tests cover previews before completion, cancellation closing the connection and
-missing stream terminators; UI tests cover stale previews and metric privacy.
-Native async HTTP and bounded runtime retry are opt-in. Built-in shell cancellation
-is now wired through `run_controlled`: bounded polling, Unix group cleanup and
-unknown-effect receipts are tested. Custom runner interruption remains the
-implementer’s responsibility.
-
-Validation on 2026-09-12 also exercised the actual TUI against a local SSE fixture:
-preview display, active Ctrl-C staying in the UI, socket closure, cancellation in
-the journal, metrics without draft text, and idle Ctrl-C exit all passed. A single
-live TUI request to `nvidia/nemotron-3.5-lightning:free` (256-token cap, no tools)
-hit its 60-second deadline at 60,002 ms without visible text. The failure metric
-was recorded; network phases were unavailable. This does not establish live SSE
-compatibility or identify upstream queue versus network delay. Live credentials
-remain unnecessary for deterministic tests.
-
-The subsequent [DeepSeek validation](crates/provider-openai/reports/2026-09-12-deepseek.md)
-completed real short and streaming replies, cancelled an active streamed reply,
-and passed one exact-approved Bubblewrap tool round trip.
-A subsequent manual-start regression also covers CRLF keys loaded via shell
-command substitution: the TUI trims surrounding whitespace, while transport
-validation continues to reject interior header newlines. This confirms the tested endpoint's SSE compatibility; it does not explain the
-previous free-route timeout. The actual TUI also cancelled an explicitly approved
-shell on each of the local and Bubblewrap backends in 51 ms, preserving an
-unknown-effect receipt before turn cancellation.
-
-Reserve verification time in a task budget rather than spending the entire budget
-on generation. Automatic compaction or resumption must preserve user constraints
-and the provenance of verification evidence.
-
-**Native async transport slice (2026-09-21):** additive `AsyncHttpTransport` and
-`new_async` reuse final request accounting and complete-response validation.
-Optional `ReqwestTransport` uses reqwest/Rustls on the host's Tokio runtime,
-without a per-request worker. Cancellation, deadlines and dropping the future
-release local in-flight I/O; automatic redirects/retries and idle pooling are
-disabled. Bounded local HTTP fixtures cover JSON/SSE, pre-header and streamed
-cancellation, abandonment, incomplete tool calls, HTTP statuses, timeout, limits,
-invalid headers, missing runtime and budget rejection. The existing curl/TUI path
-and core's runtime independence are preserved.
-
-Native diagnostics cannot measure DNS/TCP/TLS/first-wire-byte
-phases; TLS/live model and hosted platform validation need separate evidence.
-The committed lockfile retains Rust 1.85-compatible transitive dependencies.
-Validation: Linux Rust 1.85.0 and stable each pass 87 unit/integration tests plus
-one compile-only documentation example; one Bubblewrap test is explicitly ignored.
-Strict workspace Clippy, rustfmt, rustdoc and diff checks pass. The minimal facade
-still has no Tokio/reqwest dependency. Live TLS validation remains pending.
-
-**Budget, retry, and behavior evaluation (2026-11-24):** opt-in cumulative
-generation deadlines and token reservations leave a verification window for
-the trusted host. Bounded model retries preserve iteration and receipt
-ordering. A scripted Rust behavior suite accepts equivalent code and
-measured 2/3 verified successes and one false completion in core-only mode,
-versus 3/3 verified successes and zero false completions with the task layer.
-
-**Local persistence (2026-11-24):** local file ownership and shared
-per-thread guards landed with explicit version-1 model-boundary resumption.
-Fault tests reopen journals interrupted at the model, approval, execution
-and receipt boundaries. Pending work requires the existing recovery path,
-which preserves unknown effects. Hooks and process-local task budgets
-are excluded from v1 resumption. Durable approval waiting, execution
-supervision, and client reconnection remain separate work.
-
-## Ordered delivery queue (2026-11-24)
-
-Keep each numbered step independently reviewable. Hosted validation is
-tracked separately from the locally verified feature acceptance.
-
-| Order | Scope and reason | Required evidence before advancing |
+| Step | Owner and likely files | Dependency |
 | --- | --- | --- |
-| 1 — completed | Focused editing: the explicit next area after context; enable safe, reviewable coding changes. | Multi-file fixture, stale/ambiguous input rejection, bounded reads/search, unchanged approval and receipt semantics (above). |
-| 2 — implemented | Maintenance gate: verify Rust 1.85 support and automate format, Clippy, tests and rustdoc on Linux. | Actual minimum-toolchain build/test evidence; CI distinguishes protocol checks from opt-in Bubblewrap containment checks. |
-| 3 — implemented at the embedding boundary | Provider/runtime: native transport, finite model retries, and cumulative time/token budgets with a verification reserve. | Cancellation, incomplete streams, receipt ordering, and retry/budget exhaustion covered locally. |
-| 4 — local model-boundary slice implemented | Persistence: log ownership and versioned explicit continuation. | Fault injection at model, approval, execution-start and receipt boundaries; safe continuation and recovery without action replay. Durable approval waiting remains pending. |
-| 5 | Execution supervision: durable execution identity/status independent of a model worker, building on ownership/reconciliation rules. | Worker restart reconciles running/completed IDs; cleanup and resource limits remain observable; unknown work is not launched again. |
-| 6 | Control plane: reconstruct durable status and expose resume/delivery workflows over the preceding boundaries. | Client reconnect after restart reports correct task/turn/pending action/delivery state, including unknown effects. |
-| 7 — gated | Measured orchestration/adaptation (stage 4), beginning with independent evaluation. | Named held-out success/false-completion/cost evidence before adding concurrency, dynamic tools or adaptive profiles. |
+| A. Test the runtime producer against its evaluator | Nausicaa `.github/workflows/` and `crates/eval/` | None |
+| B. Test the wiki consumer against candidate revisions | Ohmu `scripts/check_local_host.py`, `crates/ohmu-nausicaa/`, CI and compatibility docs | None |
+| C. Gate knowledge artifacts from the real producer | Ohmu `scripts/evaluate.py` and workflow fixtures, Teto scoring tests and CI | A and B |
+| D. Surface durable local status and explicit continuation | Nausicaa `crates/app-server/`, with read-only TUI status as a later client change | A |
+| E. Reconcile one independently durable operation | Owning execution backend, with a small optional Nausicaa adapter if needed | D and a named host use case |
+| F. Expand evaluation with independent behavioral and semantic evidence | Nausicaa `crates/eval/`, Ohmu held-out annotations, and Teto scorers and policies | B and C |
 
-Cross-cutting fault injection accompanies each owning change. Journal recovery
-sharing, transactional storage, trace retention and memory-growth work remain
-explicit design items below; this queue does not silently introduce a universal
-store or scheduler.
+### A. Test the runtime producer against its evaluator
 
-## 4. Measured orchestration and adaptation — exploratory
+- [ ] Run the current checkout's exact-content fixture CLI in Nausicaa CI and
+  feed the artifact to a pinned Teto. Keep the existing Teto-owned static
+  producer check as coverage for its supported baseline.
+- [ ] Check both gate directions. Keep reports on holds and errors. Check that
+  the planned denial and unknown interruption retain their receipt expectations,
+  unexpected turn errors fail the integration check, and rescoring identical
+  bytes produces identical reports.
+- [ ] Keep credentials and live endpoints out of this job. Run the existing
+  Rust 1.85 and empty-default-facade checks independently.
 
-Enter this stage when the single-agent task baseline and its metrics are useful.
+### B. Test the wiki consumer against candidate revisions
 
-- **Independent reviewer:** use tests or a narrowly scoped evaluator with explicit
-  criteria. Measure false completion and cost against the single-agent baseline.
-- **Subagents:** define bounded inputs and outputs, isolated contexts/worktrees,
-  inherited capability ceilings, shared budget accounting, and cancellation
-  propagation. Test failed children and merge conflicts before adding concurrency.
-- **Dynamic tools:** introduce discovery when tool/schema volume warrants it.
-  Loaded tools still pass normal policy, preparation, approval, and receipt paths.
-- **Memory:** add provenance, repository/version scope, invalidation, and
-  correction before optimizing semantic recall. Evaluate useful recall and stale
-  recall separately.
-- **Model profiles:** measure prompt/tool/context settings per model. Keep
-  profiles optional and versioned; compare cost, latency, and task success.
-- **Trace-driven improvement:** let an agent propose harness changes from failed
-  traces, then evaluate on held-out tasks. Adoption must be reversible and based
-  on measured improvement, not the agent's own approval of its change.
+- [ ] Keep the pinned, locked Ohmu job. Add a candidate-revision check using the
+  temporary consumer with `--with-provider`. Test both the dependency graph
+  and an actual read or cited workflow using that candidate core and provider.
+- [ ] Verify hidden apply denial, exact approved apply in the maintenance path,
+  stale-snapshot handling, receipt persistence before the next model request,
+  and reconciliation by Ohmu operation ID after an interrupted publication.
+  Reopen a supported journal when evaluating a pin change.
+- [ ] Treat a release pin bump as a separate change after the candidate checks
+  pass. Record the tested revision pair and toolchains. Ohmu's Rust 1.98 pin
+  does not change Nausicaa's minimum toolchain.
 
-**Acceptance:** each added mechanism improves a named metric without unacceptable
-regressions on safety invariants, held-out tasks, cost, or latency. Configuration
-and artifact versions must make comparisons reproducible.
+### C. Gate knowledge artifacts from the real producer
 
-## Maintenance work to schedule explicitly
+- [ ] Produce a deterministic Ohmu `evaluation.json` from a fresh fixture wiki
+  and a local scripted model. Keep the original annotations, snapshot identity,
+  journals, and acceptance reports. Score those artifacts in Teto using a
+  pinned revision and retain reports on failure.
+- [ ] Check an exact citation, a forged or stale locator, and an accepted
+  abstention without quotes. Verify that Teto rejects changed annotations and
+  incomplete case sets, leaves unavailable metrics unscored, and holds the
+  offline check when the producer aborts or evidence cannot be read. Use CI
+  assertions over the score report for this check. Teto's standalone
+  `gate` command currently expects Suite Run evidence.
+- [ ] Keep expected-source coverage, quote identity, and abstention visible
+  separately. Leave semantic support and contradictions out of release decisions
+  until independent labels exist.
 
-- Implemented (2026-09-21): preserve Rust 1.85.0 by replacing unsupported let
-  chains with equivalent conditionals/filters. The committed dependency lockfile
-  passes all 78 default tests on Linux 1.85.0; one Bubblewrap test remains opt-in.
-  Minimal-facade compilation is checked separately. No API or data-format change.
-- Implemented: [CI](.github/workflows/ci.yml) runs the documented quality checks
-  and tests Linux with Rust 1.85.0 and stable. A manual Bubblewrap lifecycle
-  job first probes namespace availability and reports an environment failure
-  explicitly. Local workflow lint and Linux checks passed. See the
-  [hosted workflow results](https://github.com/Ceskoslov/Nausicaa/actions/workflows/ci.yml)
-  for the latest Linux matrix. The cancellation test covers sandbox lifecycle.
-- Decide whether to share journal recovery across event, task, and memory stores
-  or introduce transactional storage. Define schema migration and ownership first.
-- Extend fault injection to append failures, lifecycle boundaries, and worker
-  interruption. The current green tests do not prove every crash point is safe.
-- Review long-history memory growth, event snapshots/indexing, observer backpressure,
-  and sensitive-data handling before treating traces as a production dataset.
+### D. Surface durable local status and explicit continuation
 
-## Design references
+- [ ] Add read-only journal-derived status using thread and turn IDs. Report an
+  active turn only with a live owner. After restart, distinguish terminal
+  history, eligible model-boundary continuation, and required recovery.
+  Keep optional task, ledger, and application verdicts in their owning hosts.
+- [ ] Reconnect after faults at model request, approval, execution-start, and
+  receipt boundaries. Verify that querying status has no tool effects, known
+  boundaries can continue only by explicit request, and an unknown receipt
+  blocks continuation. Test a legacy log and concurrent recover/resume requests.
+- [ ] Review status and continuation behavior through the JSON-RPC client before
+  exposing it in the TUI. Evaluate reconnect latency on a long journal against
+  the existing event-read path before choosing pagination or persisted indexes.
 
-These inform proposed experiments; their results are not Nausicaa benchmarks.
+### E. Reconcile one independently durable operation
 
-- [Anthropic: harness design for long-running application development](https://www.anthropic.com/engineering/harness-design-long-running-apps)
-  (2026-03-24): explicit sprint contracts and a separate evaluator motivate stage 2.
-- [LangChain: improving Deep Agents with harness engineering](https://www.langchain.com/blog/improving-deep-agents-with-harness-engineering)
-  (2026-02-17): trace analysis and controlled evaluation motivate the measurement loop.
-- [Anthropic: scaling Managed Agents](https://www.anthropic.com/engineering/managed-agents)
-  (2026-04-08): separate session, harness, and sandbox lifecycles inform stage 3.
-- [Deep Agents architecture](https://github.com/langchain-ai/deepagents/blob/main/libs/ARCHITECTURE.md):
-  optional middleware, backends, and profiles provide comparison points. This is
-  a moving upstream document, not a pinned implementation dependency.
+- [ ] Start when a named host operation can outlive its worker and exposes a
+  durable operation ID or authoritative status. Ohmu publication is a reference
+  for domain-owned reconciliation. A task lease supplies authority to report a
+  result while valid and does not supply evidence of the external effect.
+- [ ] Fault after execution-start and after the effect but before receipt
+  persistence. On worker restart, recover a known outcome or preserve unknown.
+  Verify that neither restart nor lease expiry launches a second operation and
+  that any unconfirmed status stays visible to clients.
+- [ ] Require a concrete host need before durable approval waiting, resident
+  delivery, or a generic supervisor. Bind any future approval to the same
+  prepared action and specify how old logs replay before writing new events.
+
+### F. Expand evaluation with independent evidence
+
+- [ ] Add an explicit Teto reader or trusted exporter for `rust-behavior-v1`
+  before putting that suite in a release gate. Preserve fixture and verifier
+  revisions. Keep compile or run infrastructure errors distinct from a failed
+  behavior assertion. Retain the fixed Rust fixture contract for existing runs.
+- [ ] For live comparisons, pin model deployment, counter, fixture snapshot, and
+  environment. Use held-out cases, record coverage, false completion, usage,
+  cost, and latency, and derive policy thresholds from retained baseline runs.
+  For Ohmu, add human labels for answer support and contradictions before
+  calibrating a semantic scorer. Keep live runs opt-in and budgeted.
+- [ ] Reuse Teto's offline score and gate commands before adding a transport.
+  Consider Teto's planned evaluation service when an identified client needs
+  asynchronous submission and retrieval with idempotency and artifact access
+  control.
+
+## Work gated by demonstrated need
+
+Keep subagent scheduling, adaptive profiles, dynamic tool discovery, semantic
+compaction, shared persistence, and new execution backends out of the delivery
+queue. Revisit each when a named host workflow or held-out measurement exposes a
+specific gap. Check journal growth and evidence retention before increasing
+artifact collection. Keep sandbox containment checks separate from process
+lifecycle tests. Ohmu remains responsible for wiki retrieval, and Nausicaa's
+advisory memory remains general-purpose.

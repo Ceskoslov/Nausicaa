@@ -2,7 +2,7 @@
 
 The mandatory invariants live in `agent-harness-core`. Filesystem context, memory, process execution, provider integration, background work, the JSON-RPC control plane, and the terminal UI are optional crates. Applications can embed only the core or compose a complete local coding agent through the feature-gated `agent-harness` facade.
 
-This README covers setup and public usage. Read [ARCHITECTURE.md](ARCHITECTURE.md) for implemented boundaries and failure semantics, [AGENTS.md](AGENTS.md) for contribution instructions, and [ROADMAP.md](ROADMAP.md) for the verified reliability baseline and proposed next stages. Optional deterministic task acceptance is available; resumable execution and multi-agent orchestration remain planned.
+This README covers setup and public usage. Read [ARCHITECTURE.md](ARCHITECTURE.md) for implemented boundaries and failure semantics, [AGENTS.md](AGENTS.md) for contribution instructions, and [ROADMAP.md](ROADMAP.md) for the Teto and Ohmu integration plan. Optional deterministic task acceptance and explicit model-boundary resumption are available.
 
 ## Table of contents
 
