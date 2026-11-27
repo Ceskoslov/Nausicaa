@@ -107,16 +107,17 @@ proceed without D or E. Checked items have local acceptance evidence.
 
 ### B. Test the wiki consumer against candidate revisions
 
-- [ ] Keep the pinned, locked Ohmu job. Add a candidate-revision check using the
-  temporary consumer with `--with-provider`. Test both the dependency graph
-  and an actual read or cited workflow using that candidate core and provider.
-- [ ] Verify hidden apply denial, exact approved apply in the maintenance path,
-  stale-snapshot handling, receipt persistence before the next model request,
-  and reconciliation by Ohmu operation ID after an interrupted publication.
-  Reopen a supported journal when evaluating a pin change.
-- [ ] Treat a release pin bump as a separate change after the candidate checks
-  pass. Record the tested revision pair and toolchains. Ohmu's Rust 1.98 pin
-  does not change Nausicaa's minimum toolchain.
+- [x] Ohmu keeps its pinned, locked job and has a separate
+  [candidate workflow](https://github.com/Ceskoslov/Ohmu/actions/workflows/nausicaa-candidate.yml).
+  Its temporary patched workspace verifies a unique candidate core and native
+  provider, then runs the Ohmu workspace tests, including the loopback CLI.
+- [x] The suite checks hidden apply denial, exact approved apply, stale
+  snapshots, receipt persistence before the next model request, and recovery
+  by operation ID after interrupted publication. The candidate job records both
+  revisions and the toolchain.
+- Before a separate release pin update, reopen a journal written by the
+  supported Git revision with the candidate reader. Ohmu uses Rust 1.98.
+  Nausicaa's minimum remains Rust 1.85.
 
 ### C. Gate knowledge artifacts from the real producer
 
